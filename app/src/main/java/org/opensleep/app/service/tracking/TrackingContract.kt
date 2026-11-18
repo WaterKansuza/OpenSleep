@@ -5,6 +5,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import org.opensleep.app.data.local.db.SleepStage
 import org.opensleep.app.data.local.db.TrackingMode
+import org.opensleep.app.data.local.db.WakeMode
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -28,11 +29,13 @@ data class TrackingUiState(
     val activeSessionId: Long? = null,
     val startTimeMs: Long = 0L,
     val trackingMode: TrackingMode = TrackingMode.PASSIVE,
+    val wakeMode: WakeMode = WakeMode.NATURAL_NO_ALARM,
     val currentStage: SleepStage = SleepStage.AWAKE,
     val latestMotionIntensity: Float = 0f,
     val latestBreathingBpm: Float? = null,
     val isInSmartWakeWindow: Boolean = false,
-    val activeAlarmId: Long? = null
+    val activeAlarmId: Long? = null,
+    val pendingCheckInSessionId: Long? = null
 )
 
 @Singleton
@@ -42,6 +45,10 @@ class TrackingStateHolder @Inject constructor() {
 
     fun update(transform: (TrackingUiState) -> TrackingUiState) {
         _state.value = transform(_state.value)
+    }
+
+    fun clearPendingCheckIn() {
+        _state.value = _state.value.copy(pendingCheckInSessionId = null)
     }
 
     fun reset() {

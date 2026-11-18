@@ -21,7 +21,7 @@ import org.opensleep.app.data.local.db.entity.*
         SoundEventEntity::class,
         AlarmConfigEntity::class
     ],
-    version = 1,
+    version = 2,
     exportSchema = true
 )
 @TypeConverters(SleepConverters::class)

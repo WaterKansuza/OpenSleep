@@ -17,6 +17,7 @@ import kotlinx.coroutines.*
 import org.opensleep.app.data.local.db.SessionType
 import org.opensleep.app.data.local.db.SleepStage
 import org.opensleep.app.data.local.db.TrackingMode
+import org.opensleep.app.data.local.db.WakeMode
 import org.opensleep.app.data.local.db.dao.SleepSessionDao
 import org.opensleep.app.data.local.db.entity.SleepEpochEntity
 import org.opensleep.app.data.local.db.entity.SleepSessionEntity
@@ -53,6 +54,7 @@ class NightTimeService : Service() {
         const val ACTION_START_TRACKING = "org.opensleep.app.ACTION_START_TRACKING"
         const val ACTION_STOP_TRACKING = "org.opensleep.app.ACTION_STOP_TRACKING"
         const val EXTRA_SESSION_TYPE = "extra_session_type"
+        const val EXTRA_WAKE_MODE = "extra_wake_mode"
 
         private const val CHANNEL_ID = "opensleep_tracking_channel"
         private const val NOTIFICATION_ID = 1001
@@ -69,7 +71,10 @@ class NightTimeService : Service() {
                 val typeName = intent.getStringExtra(EXTRA_SESSION_TYPE)
                 val sessionType = runCatching { SessionType.valueOf(typeName ?: "NIGHT") }
                     .getOrDefault(SessionType.NIGHT)
-                startTrackingPipeline(sessionType)
+                val wakeModeName = intent.getStringExtra(EXTRA_WAKE_MODE)
+                val wakeMode = runCatching { WakeMode.valueOf(wakeModeName ?: "NATURAL_NO_ALARM") }
+                    .getOrDefault(WakeMode.NATURAL_NO_ALARM)
+                startTrackingPipeline(sessionType, wakeMode)
             }
             ACTION_STOP_TRACKING -> {
                 if (activeSessionId != -1L) {
@@ -82,7 +87,7 @@ class NightTimeService : Service() {
         return START_STICKY
     }
 
-    private fun startTrackingPipeline(sessionType: SessionType) {
+    private fun startTrackingPipeline(sessionType: SessionType, wakeMode: WakeMode) {
         acquireWakeLock()
         promoteToForeground()
         smartWakeTriggered = false
@@ -95,6 +100,7 @@ class NightTimeService : Service() {
                 referenceDateEpochDay = LocalDate.now().toEpochDay(),
                 sessionType = sessionType,
                 trackingMode = sensorSource.mode,
+                wakeMode = wakeMode,
                 startTimeMs = nowMs,
                 endTimeMs = nowMs,
                 asleepTimeMs = nowMs,
@@ -112,6 +118,7 @@ class NightTimeService : Service() {
                     activeSessionId = activeSessionId,
                     startTimeMs = nowMs,
                     trackingMode = sensorSource.mode,
+                    wakeMode = wakeMode,
                     currentStage = SleepStage.AWAKE
                 )
             }
@@ -170,6 +177,7 @@ class NightTimeService : Service() {
         // Đảm bảo đã theo dõi ít nhất 20 phút và đang ở giấc ngủ nông hoặc tỉnh nhẹ
         if (elapsedMin >= 20 && (currentStage == SleepStage.LIGHT || currentStage == SleepStage.AWAKE)) {
             smartWakeTriggered = true
+            trackingStateHolder.update { it.copy(wakeMode = WakeMode.SMART_ALARM) }
             val alarmId = uiState.activeAlarmId ?: -1L
             if (alarmId != -1L) {
                 alarmScheduler.cancelAlarm(alarmId)
@@ -220,8 +228,11 @@ class NightTimeService : Service() {
                     val firstAsleep = epochs.firstOrNull { it.stage != SleepStage.AWAKE }?.timestampMs ?: session.startTimeMs
                     val lastWake = epochs.lastOrNull { it.stage != SleepStage.AWAKE }?.timestampMs ?: endMs
 
+                    val finalWakeMode = trackingStateHolder.state.value.wakeMode
+
                     val draftSession = session.copy(
                         referenceDateEpochDay = refDay,
+                        wakeMode = finalWakeMode,
                         endTimeMs = endMs,
                         asleepTimeMs = firstAsleep,
                         wakeUpTimeMs = lastWake,
@@ -242,7 +253,8 @@ class NightTimeService : Service() {
             }
         }
 
-        trackingStateHolder.reset()
+        // Bật Morning Check-in cho người dùng
+        trackingStateHolder.update { TrackingUiState(pendingCheckInSessionId = sessionId) }
         recentEpochs.clear()
         releaseWakeLock()
         stopForeground(STOP_FOREGROUND_REMOVE)

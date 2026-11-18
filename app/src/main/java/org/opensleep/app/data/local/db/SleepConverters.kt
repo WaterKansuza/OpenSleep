@@ -34,6 +34,12 @@ enum class SleepStage {
     REM
 }
 
+enum class WakeMode {
+    NATURAL_NO_ALARM, // Không báo thức: tự thức dậy -> Dữ liệu vàng hiệu chuẩn Nhu cầu ngủ
+    SMART_ALARM,      // Dậy trong cửa sổ Smart Wake
+    HARD_ALARM        // Bị ép dậy đúng giờ hẹn
+}
+
 enum class NoteImpactType {
     POSITIVE,
     NEGATIVE,
@@ -67,6 +73,9 @@ class SleepConverters {
 
     @TypeConverter fun fromSleepStage(v: SleepStage): String = v.name
     @TypeConverter fun toSleepStage(v: String): SleepStage = SleepStage.valueOf(v)
+
+    @TypeConverter fun fromWakeMode(v: WakeMode): String = v.name
+    @TypeConverter fun toWakeMode(v: String): WakeMode = WakeMode.valueOf(v)
 
     @TypeConverter fun fromNoteImpact(v: NoteImpactType): String = v.name
     @TypeConverter fun toNoteImpact(v: String): NoteImpactType = NoteImpactType.valueOf(v)

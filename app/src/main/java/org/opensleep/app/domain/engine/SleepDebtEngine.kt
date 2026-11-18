@@ -3,6 +3,7 @@ package org.opensleep.app.domain.engine
 import org.opensleep.app.data.local.db.DebtStatusLevel
 import org.opensleep.app.data.local.db.SessionType
 import org.opensleep.app.data.local.db.TrackingMode
+import org.opensleep.app.data.local.db.WakeMode
 import org.opensleep.app.data.local.db.entity.MoodEntryEntity
 import org.opensleep.app.data.local.db.entity.SleepSessionEntity
 import org.opensleep.app.data.local.db.entity.UserSleepProfileEntity
@@ -226,24 +227,28 @@ class SleepDebtEngine @Inject constructor() {
     ): Int {
         val moodBySessionId = recentMoods.mapNotNull { m -> m.sessionId?.let { it to m } }.toMap()
 
-        val highQualityNights = recentSessions.filter { session ->
-            if (session.isIncomplete || session.sessionType != SessionType.NIGHT) return@filter false
+        val weightedSamples = recentSessions.mapNotNull { session ->
+            if (session.isIncomplete || session.sessionType != SessionType.NIGHT) return@mapNotNull null
             val mins = (session.sleepDurationMs / 60_000L).toInt()
-            if (mins !in 330..660) return@filter false // Lọc ngoại lai (< 5.5h hoặc > 11h)
+            if (mins !in 330..660) return@mapNotNull null
 
             val ratingOk = (session.sleepRating ?: 0) >= 4
             val energyOk = (moodBySessionId[session.id]?.morningEnergyScore ?: 0) >= 4
-            ratingOk || energyOk
+            val isNatural = session.wakeMode == WakeMode.NATURAL_NO_ALARM
+
+            when {
+                isNatural && (ratingOk || energyOk) -> mins to 2.5
+                isNatural -> mins to 1.5
+                ratingOk || energyOk -> mins to 1.0
+                else -> null
+            }
         }
 
-        if (highQualityNights.size < 5) return currentNeedMinutes
+        if (weightedSamples.size < 4) return currentNeedMinutes
 
-        val observedAvg = highQualityNights
-            .map { (it.sleepDurationMs / 60_000L).toDouble() }
-            .average()
-
-        // Exponential Moving Average với bước nhảy tối đa ±15 phút mỗi lần cập nhật
-        val delta = ((observedAvg - currentNeedMinutes) * 0.20).roundToInt().coerceIn(-15, 15)
+        val totalWeight = weightedSamples.sumOf { it.second }
+        val weightedAvg = weightedSamples.sumOf { it.first * it.second } / totalWeight
+        val delta = ((weightedAvg - currentNeedMinutes) * 0.25).roundToInt().coerceIn(-15, 15)
         return (currentNeedMinutes + delta).coerceIn(MIN_PHYSIOLOGICAL_NEED_MIN, MAX_PHYSIOLOGICAL_NEED_MIN)
     }
 
