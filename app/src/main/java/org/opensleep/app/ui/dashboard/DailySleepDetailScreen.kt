@@ -40,6 +40,7 @@ import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import androidx.compose.foundation.lazy.rememberLazyListState
 
 data class DaySleepStripItem(
     val epochDay: Long,
@@ -135,13 +136,29 @@ fun DailyHoursStrip(
     onSelectDay: (Long) -> Unit
 ) {
     val dowFmt = remember { DateTimeFormatter.ofPattern("EE") }
-    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+    val listState = rememberLazyListState()
+
+    // Tự động cuộn để focus ngày đang chọn (mặc định là Hôm nay ở cuối dải)
+    LaunchedEffect(days.size, selectedEpochDay) {
+        val targetIdx = days.indexOfFirst { it.epochDay == selectedEpochDay }
+        if (targetIdx >= 0) {
+            listState.animateScrollToItem(index = maxOf(0, targetIdx - 2))
+        }
+    }
+
+    LazyRow(
+        state = listState,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
         items(days, key = { it.epochDay }) { item ->
             val isSelected = item.epochDay == selectedEpochDay
             val met = item.totalSleepMinutes >= item.targetNeedMinutes
             Surface(
                 shape = RoundedCornerShape(16.dp),
-                color = if (isSelected) SleepPalette.StageDeep else SleepPalette.SurfaceCard,
+                color = if (isSelected) Color(0xFF27272A) else SleepPalette.SurfaceCard,
+                border = if (isSelected) {
+                    androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFE4E4E7).copy(alpha = 0.45f))
+                } else null,
                 modifier = Modifier
                     .width(68.dp)
                     .clickable { onSelectDay(item.epochDay) }
@@ -213,9 +230,20 @@ fun SleepStages4TierCard(epochs: List<SleepEpochEntity>) {
         shape = RoundedCornerShape(20.dp),
         modifier = Modifier.fillMaxWidth()
     ) {
-        Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text("Các khoảng Awake • REM • Core • Deep", color = Color.White, fontWeight = FontWeight.Bold)
+        Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text(
+                text = "Các khoảng Awake • REM • Core • Deep",
+                color = Color.White,
+                fontWeight = FontWeight.Bold
+            )
+
+            // Hàng riêng cố định hiển thị 03:42 • Awake • 15 bpm, không bị ép dạt sang mép phải
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(SleepPalette.SurfaceElevated, RoundedCornerShape(10.dp))
+                    .padding(horizontal = 12.dp, vertical = 8.dp)
+            ) {
                 val inspected = inspectedIndex?.let { epochs.getOrNull(it) }
                 if (inspected != null) {
                     val t = Instant.ofEpochMilli(inspected.timestampMs).atZone(ZoneId.systemDefault()).format(timeFmt)
@@ -224,7 +252,15 @@ fun SleepStages4TierCard(epochs: List<SleepEpochEntity>) {
                         text = "$t • ${inspected.stage.displayLabel()}$br",
                         color = inspected.stage.stageColor(),
                         fontWeight = FontWeight.SemiBold,
-                        style = MaterialTheme.typography.labelSmall
+                        style = MaterialTheme.typography.bodySmall,
+                        maxLines = 1
+                    )
+                } else {
+                    Text(
+                        text = "Chạm hoặc kéo ngang trên biểu đồ để xem từng mốc 30 giây",
+                        color = Color.Gray,
+                        style = MaterialTheme.typography.bodySmall,
+                        maxLines = 1
                     )
                 }
             }

@@ -456,7 +456,7 @@ fun NightstandTrackingOverlay(
                 color = uiState.tracking.currentStage.stageColor().copy(alpha = 0.8f)
             )
             uiState.tracking.latestBreathingBpm?.let { bpm ->
-                Text("Nhịp thở Sonar: ${String.format("%.1f", bpm)} nhịp/phút", color = Color(0xFF38BDF8))
+                Text("Nhịp thở Sonar: ${String.format("%.1f", bpm)} nhịp/phút", color = SleepPalette.StageRem)
             }
             if (uiState.tracking.trackingMode == TrackingMode.SONAR && waveSamples.size > 2) {
                 Canvas(modifier = Modifier.fillMaxWidth().height(72.dp)) {
@@ -467,14 +467,14 @@ fun NightstandTrackingOverlay(
                         val y = size.height / 2f - (v / maxAbs) * (size.height * 0.4f)
                         if (idx == 0) path.moveTo(0f, y) else path.lineTo(idx * step, y)
                     }
-                    drawPath(path, color = Color(0xFF0E7490), style = Stroke(width = 2.dp.toPx()))
+                    drawPath(path, color = Color(0xFF71717A), style = Stroke(width = 2.dp.toPx()))
                 }
             }
         }
 
         Button(
             onClick = onStopTracking,
-            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1F2937)),
+            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1C1C1F)),
             modifier = Modifier.fillMaxWidth().height(56.dp),
             shape = RoundedCornerShape(28.dp)
         ) {

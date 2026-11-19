@@ -33,11 +33,9 @@ class PassiveSleepSensorSource @Inject constructor(
     private var audioJob: Job? = null
     private val audioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    // Bộ lọc trọng lực cho gia tốc kế (High-pass alpha)
     private val gravity = FloatArray(3)
     private var isGravityInitialized = false
 
-    // Biến tích lũy cho cửa sổ 30 giây (được bảo vệ bởi lock)
     private val lock = Any()
     private var motionSum = 0.0
     private var motionPeak = 0f
@@ -46,16 +44,28 @@ class PassiveSleepSensorSource @Inject constructor(
     private var soundEnergyPeakDb = -90f
     private var soundActiveFrames = 0
     private var soundTotalFrames = 0
-    private var adaptiveNoiseFloorDb = -55f
+
+    // Hiệu chuẩn 30s đầu để tránh kẹt ở -55 dB khi phòng có quạt/điều hòa
+    private val calibrationSamplesDb = mutableListOf<Float>()
+    private var isNoiseCalibrated = false
+    private var adaptiveNoiseFloorDb = -48f
 
     companion object {
         private const val SAMPLE_RATE_HZ = 16_000
         private const val GRAVITY_ALPHA = 0.85f
-        private const val MOTION_SCALE = 1.8f // Chuẩn hóa dao động trên nệm về [0..1+]
+        private const val MOTION_SCALE = 1.8f
+        private const val CALIBRATION_FRAMES_TARGET = 468 // ~30s @ 16kHz / 1024 mẫu
+        private const val SOUND_TRANSIENT_MARGIN_DB = 12f
+        private const val MAX_SOUND_CONTRIBUTION = 0.15f
     }
 
     override suspend fun start() {
         resetAccumulators()
+        synchronized(lock) {
+            calibrationSamplesDb.clear()
+            isNoiseCalibrated = false
+            adaptiveNoiseFloorDb = -48f
+        }
         isGravityInitialized = false
 
         accelerometer?.let {
@@ -88,7 +98,6 @@ class PassiveSleepSensorSource @Inject constructor(
             return
         }
 
-        // Tách thành phần trọng lực tĩnh để chỉ lấy gia tốc chuyển động
         gravity[0] = GRAVITY_ALPHA * gravity[0] + (1f - GRAVITY_ALPHA) * x
         gravity[1] = GRAVITY_ALPHA * gravity[1] + (1f - GRAVITY_ALPHA) * y
         gravity[2] = GRAVITY_ALPHA * gravity[2] + (1f - GRAVITY_ALPHA) * z
@@ -97,8 +106,6 @@ class PassiveSleepSensorSource @Inject constructor(
         val ly = y - gravity[1]
         val lz = z - gravity[2]
         val linearMagnitude = sqrt(lx * lx + ly * ly + lz * lz)
-
-        // Lọc nhiễu vi mạch cảm biến (< 0.03 m/s^2)
         val cleanMotion = if (linearMagnitude < 0.03f) 0f else linearMagnitude
 
         synchronized(lock) {
@@ -147,14 +154,25 @@ class PassiveSleepSensorSource @Inject constructor(
                     if (readCount > 0) {
                         val db = computeRmsDb(pcmBuffer, readCount)
                         synchronized(lock) {
-                            // Cập nhật nền ồn môi trường từ từ (quạt, điều hòa)
-                            if (db < adaptiveNoiseFloorDb + 6f) {
-                                adaptiveNoiseFloorDb = 0.98f * adaptiveNoiseFloorDb + 0.02f * db
+                            if (!isNoiseCalibrated) {
+                                calibrationSamplesDb.add(db)
+                                if (calibrationSamplesDb.size >= CALIBRATION_FRAMES_TARGET) {
+                                    val sorted = calibrationSamplesDb.sorted()
+                                    val p75Idx = ((sorted.size - 1) * 0.75f).toInt()
+                                    adaptiveNoiseFloorDb = sorted[p75Idx]
+                                    isNoiseCalibrated = true
+                                    calibrationSamplesDb.clear()
+                                }
+                            } else {
+                                if (db <= adaptiveNoiseFloorDb + 8f) {
+                                    val alpha = if (db < adaptiveNoiseFloorDb) 0.08f else 0.03f
+                                    adaptiveNoiseFloorDb = (1f - alpha) * adaptiveNoiseFloorDb + alpha * db
+                                }
+                                if (db > adaptiveNoiseFloorDb + SOUND_TRANSIENT_MARGIN_DB) {
+                                    soundActiveFrames++
+                                }
                             }
                             if (db > soundEnergyPeakDb) soundEnergyPeakDb = db
-                            if (db > adaptiveNoiseFloorDb + 8f) {
-                                soundActiveFrames++
-                            }
                             soundTotalFrames++
                         }
                     }
@@ -173,21 +191,20 @@ class PassiveSleepSensorSource @Inject constructor(
         val peakMotion: Float
         val peakDb: Float
         val soundActiveRatio: Float
-
+        val calibrated: Boolean
         synchronized(lock) {
             avgMotion = if (motionSampleCount > 0) (motionSum / motionSampleCount).toFloat() else 0f
             peakMotion = motionPeak
             peakDb = soundEnergyPeakDb
-            soundActiveRatio = if (soundTotalFrames > 0) {
+            calibrated = isNoiseCalibrated
+            soundActiveRatio = if (calibrated && soundTotalFrames > 0) {
                 soundActiveFrames.toFloat() / soundTotalFrames.toFloat()
             } else 0f
-
             resetAccumulators()
         }
 
-        // Tổng hợp chỉ số chuyển động từ Gia tốc kế + Xung âm thanh đột ngột
         val accelScore = (avgMotion * 0.6f + peakMotion * 0.4f) / MOTION_SCALE
-        val soundContribution = (soundActiveRatio * 0.65f).coerceIn(0f, 0.5f)
+        val soundContribution = (soundActiveRatio * 0.35f).coerceIn(0f, MAX_SOUND_CONTRIBUTION)
         val combinedMotion = (accelScore + soundContribution).coerceIn(0f, 1.5f)
 
         return EpochReading(
@@ -195,7 +212,7 @@ class PassiveSleepSensorSource @Inject constructor(
             motionIntensity = combinedMotion,
             soundEnergyDb = peakDb,
             breathingRateBpm = null,
-            confidence = if (accelerometer != null) 0.85f else 0.65f
+            confidence = if (accelerometer != null) 0.88f else 0.70f
         )
     }
 

@@ -6,52 +6,49 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 import org.opensleep.app.data.local.db.SleepStage
 
-// OLED Dark Palette (Hợp nhất cả biến cũ lẫn biến mới)
 object SleepPalette {
-    // --- Biến cũ (giữ nguyên để AlarmRingingActivity & các file cũ không lỗi) ---
-    val BackgroundDeep    = Color(0xFF000000) // Pure OLED black
-    val BackgroundCard    = Color(0xFF070B19)
-    val BackgroundElevated = Color(0xFF0D1428)
-    val PrimaryBlue       = Color(0xFF4FC3F7)
-    val PrimaryBlueDim    = Color(0xFF1565C0)
-    val SecondaryGold     = Color(0xFFFFB300)
-    val SecondaryGoldDim  = Color(0xFF7C5900)
-    val OnBackground      = Color(0xFFE8EAF6)
-    val OnBackgroundMuted = Color(0xFF7986CB)
-    val OnBackgroundDim   = Color(0xFF3D4B7A)
-    val ErrorRed          = Color(0xFFEF5350)
-    val SuccessGreen      = Color(0xFF66BB6A)
-    val WarningAmber      = Color(0xFFFFA726)
+    val BackgroundDeep     = Color(0xFF000000) // Pure OLED black
+    val BackgroundCard     = Color(0xFF0A0A0A)
+    val BackgroundElevated = Color(0xFF141414)
+    val PrimaryBlue        = Color(0xFFE4E4E7) // Trung tính trắng bạc (thay xanh dương)
+    val PrimaryBlueDim     = Color(0xFF27272A)
+    val SecondaryGold      = Color(0xFFF59E0B)
+    val SecondaryGoldDim   = Color(0xFF451A03)
+    val OnBackground       = Color(0xFFF4F4F5)
+    val OnBackgroundMuted  = Color(0xFFA1A1AA)
+    val OnBackgroundDim    = Color(0xFF52525B)
+    val ErrorRed           = Color(0xFFFB7185)
+    val SuccessGreen       = Color(0xFF4ADE80)
+    val WarningAmber       = Color(0xFFFBBF24)
 
-    // --- Biến bổ sung cho MainActivity, TodayScreen, DailySleepDetailScreen, Settings ---
-    val BackgroundDark    = Color(0xFF070B19)
-    val SurfaceCard       = Color(0xFF11182F)
-    val SurfaceElevated   = Color(0xFF1A2342)
-    val OledPureBlack     = BackgroundDeep
-    val StarGold          = Color(0xFFFDE68A)
-    val MoonSilver        = Color(0xFFE0E7FF)
-    val OptimalGreen      = Color(0xFF4ADE80)
+    val BackgroundDark     = Color(0xFF0A0A0A)
+    val SurfaceCard        = Color(0xFF141414)
+    val SurfaceElevated    = Color(0xFF1E1E1E)
+    val OledPureBlack      = BackgroundDeep
+    val StarGold           = Color(0xFFFDE68A)
+    val MoonSilver         = Color(0xFFE4E4E7)
+    val OptimalGreen       = Color(0xFF4ADE80)
 
-    // Sleep stage colors (Hypnogram)
-    val StageAwake  = Color(0xFFFF6B57)
-    val StageREM    = Color(0xFF38BDF8)
-    val StageRem    = StageREM // Alias khớp cả chữ hoa lẫn thường
-    val StageCore   = Color(0xFF3B82F6)
-    val StageDeep   = Color(0xFF6366F1)
+    // Màu các pha giấc ngủ (không dùng xanh dương)
+    val StageAwake  = Color(0xFFFB7185)
+    val StageREM    = Color(0xFFC084FC)
+    val StageRem    = StageREM
+    val StageCore   = Color(0xFFA1A1AA)
+    val StageDeep   = Color(0xFFE4E4E7)
 
     // Debt gradient
-    val DebtOptimal  = Color(0xFF66BB6A)
-    val DebtMild     = Color(0xFFFFA726)
-    val DebtHigh     = Color(0xFFEF6C00)
-    val DebtCritical = Color(0xFFB71C1C)
+    val DebtOptimal  = Color(0xFF4ADE80)
+    val DebtMild     = Color(0xFFFBBF24)
+    val DebtHigh     = Color(0xFFF97316)
+    val DebtCritical = Color(0xFFFB7185)
 }
 
 val OpenSleepDarkColorScheme = darkColorScheme(
     primary            = SleepPalette.PrimaryBlue,
-    onPrimary          = Color(0xFF000000),
+    onPrimary          = Color(0xFF0A0A0A),
     primaryContainer   = SleepPalette.PrimaryBlueDim,
     secondary          = SleepPalette.SecondaryGold,
-    onSecondary        = Color(0xFF000000),
+    onSecondary        = Color(0xFF0A0A0A),
     secondaryContainer = SleepPalette.SecondaryGoldDim,
     background         = SleepPalette.BackgroundDark,
     onBackground       = SleepPalette.OnBackground,
@@ -60,7 +57,7 @@ val OpenSleepDarkColorScheme = darkColorScheme(
     surfaceVariant     = SleepPalette.SurfaceElevated,
     onSurfaceVariant   = SleepPalette.OnBackgroundMuted,
     error              = SleepPalette.ErrorRed,
-    onError            = Color.White
+    onError            = Color(0xFF0A0A0A)
 )
 
 @Composable
@@ -71,7 +68,6 @@ fun OpenSleepTheme(content: @Composable () -> Unit) {
     )
 }
 
-// Đổi nhãn hiển thị sang Awake / REM / Core / Deep
 fun SleepStage.displayLabel(): String = when (this) {
     SleepStage.AWAKE -> "Awake"
     SleepStage.REM   -> "REM"

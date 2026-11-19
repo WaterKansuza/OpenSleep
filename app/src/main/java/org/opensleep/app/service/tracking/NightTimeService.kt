@@ -49,6 +49,7 @@ class NightTimeService : Service() {
     private var smartWakeTriggered = false
     private val epochBuffer = mutableListOf<SleepEpochEntity>()
     private val recentEpochs = ArrayDeque<SleepEpochEntity>(10)
+    private var totalEpochCount = 0
 
     companion object {
         const val ACTION_START_TRACKING = "org.opensleep.app.ACTION_START_TRACKING"
@@ -133,7 +134,8 @@ class NightTimeService : Service() {
                 windowStart = windowEnd
 
                 // Phân tầng thời gian thực có ngữ cảnh lịch sử từ SleepStagingEngine
-                val stage = sleepStagingEngine.classifyRealtimeEpoch(reading, recentEpochs.toList())
+                totalEpochCount++
+                val stage = sleepStagingEngine.classifyRealtimeEpoch(reading, recentEpochs.toList(), totalEpochCount)
                 val epoch = SleepEpochEntity(
                     sessionId = activeSessionId,
                     timestampMs = windowEnd,
@@ -217,7 +219,9 @@ class NightTimeService : Service() {
 
                     // Hậu xử lý toàn đêm (Webster Smoothing Rules)
                     val epochs = sleepStagingEngine.postProcessNightEpochs(rawEpochs)
-
+                    if (epochs.isNotEmpty()) {
+                        sleepSessionDao.insertEpochs(epochs) // Ghi đè bản đã làm mượt vào DB
+                    }
                     val lightMs = epochs.count { it.stage == SleepStage.LIGHT } * EPOCH_INTERVAL_MS
                     val deepMs = epochs.count { it.stage == SleepStage.DEEP } * EPOCH_INTERVAL_MS
                     val remMs = epochs.count { it.stage == SleepStage.REM } * EPOCH_INTERVAL_MS

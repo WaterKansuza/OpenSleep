@@ -38,8 +38,16 @@ class HistoryViewModel @Inject constructor(
     private val sleepDebtRepository: SleepDebtRepository
 ) : ViewModel() {
 
-    private val todayEpoch = LocalDate.now().toEpochDay()
-    private val selectedDayFlow = MutableStateFlow(todayEpoch)
+    private val todayEpochFlow = MutableStateFlow(LocalDate.now().toEpochDay())
+    private val selectedDayFlow = MutableStateFlow(todayEpochFlow.value)
+
+    fun refreshTodayIfNeeded() {
+        val nowEpoch = LocalDate.now().toEpochDay()
+        if (todayEpochFlow.value != nowEpoch) {
+            todayEpochFlow.value = nowEpoch
+            selectedDayFlow.value = nowEpoch
+        }
+    }
 
     @OptIn(ExperimentalCoroutinesApi::class)
     private val detailFlow = selectedDayFlow.flatMapLatest { day ->
@@ -56,47 +64,47 @@ class HistoryViewModel @Inject constructor(
         }
     }
 
-    val uiState: StateFlow<HistoryUiState> = combine(
-        sleepSessionDao.observeSessionsInRange(todayEpoch - 13, todayEpoch),
-        sleepDebtDao.observeProfile(),
-        sleepDebtRepository.observeLast14DaysSnapshots(todayEpoch),
-        selectedDayFlow,
-        detailFlow
-    ) { sessions14, profile, snapshots, selDay, detail ->
-        val targetNeed = if (profile?.autoCalibrateEnabled == true) {
-            profile.calibratedSleepNeedMinutes
-        } else {
-            profile?.targetSleepNeedMinutes ?: 480
-        }
-        val sessionsByDay = sessions14.filter { !it.isIncomplete }.groupBy { it.referenceDateEpochDay }
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val uiState: StateFlow<HistoryUiState> = todayEpochFlow.flatMapLatest { todayEpoch ->
+        combine(
+            sleepSessionDao.observeSessionsInRange(todayEpoch - 13, todayEpoch),
+            sleepDebtDao.observeProfile(),
+            sleepDebtRepository.observeLast14DaysSnapshots(todayEpoch),
+            selectedDayFlow,
+            detailFlow
+        ) { sessions14, profile, snapshots, selDay, detail ->
+            val targetNeed = if (profile?.autoCalibrateEnabled == true) {
+                profile.calibratedSleepNeedMinutes
+            } else {
+                profile?.targetSleepNeedMinutes ?: 480
+            }
+            val sessionsByDay = sessions14.filter { !it.isIncomplete }.groupBy { it.referenceDateEpochDay }
 
-        val strip = ((todayEpoch - 13)..todayEpoch).map { day ->
-            val totalMin = sessionsByDay[day]?.sumOf { (it.sleepDurationMs / 60_000L).toInt() } ?: 0
-            DaySleepStripItem(
-                epochDay = day,
-                date = LocalDate.ofEpochDay(day),
-                totalSleepMinutes = totalMin,
-                targetNeedMinutes = targetNeed
+            val strip = ((todayEpoch - 13)..todayEpoch).map { day ->
+                val totalMin = sessionsByDay[day]?.sumOf { (it.sleepDurationMs / 60_000L).toInt() } ?: 0
+                DaySleepStripItem(
+                    epochDay = day,
+                    date = LocalDate.ofEpochDay(day),
+                    totalSleepMinutes = totalMin,
+                    targetNeedMinutes = targetNeed
+                )
+            }
+
+            HistoryUiState(
+                daysStrip = strip,
+                selectedEpochDay = selDay,
+                selectedSession = detail.first,
+                selectedEpochs = detail.second,
+                selectedSoundEvents = detail.third,
+                debtSnapshots14Days = snapshots
             )
         }
-
-        HistoryUiState(
-            daysStrip = strip,
-            selectedEpochDay = selDay,
-            selectedSession = detail.first,
-            selectedEpochs = detail.second,
-            selectedSoundEvents = detail.third,
-            debtSnapshots14Days = snapshots
-        )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), HistoryUiState())
 
     fun selectDay(epochDay: Long) {
         selectedDayFlow.value = epochDay
     }
 
-    /**
-     * Ghi nhận thủ công (hoặc tạo mẫu chu kỳ Awake/REM/Core/Deep) để ghi bù ngày quên bật app.
-     */
     fun logManualSleepForSelectedDay(
         sleepMinutes: Int,
         wakeMode: WakeMode,
@@ -141,7 +149,7 @@ class HistoryViewModel @Inject constructor(
             if (generateDemoStages) {
                 val totalEpochs = (sleepMinutes * 2).coerceAtLeast(10)
                 val epochs = (0 until totalEpochs).map { idx ->
-                    val cyclePos = (idx % 180) / 180f // Chu kỳ ~90 phút (180 epoch x 30s)
+                    val cyclePos = (idx % 180) / 180f
                     val stage = when {
                         idx < 4 -> SleepStage.AWAKE
                         cyclePos in 0.15f..0.40f -> SleepStage.DEEP
