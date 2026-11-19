@@ -1,3 +1,4 @@
+// 1. CompositeSleepSensorSource.kt
 package org.opensleep.app.service.tracking
 
 import kotlinx.coroutines.flow.firstOrNull
@@ -31,4 +32,15 @@ class CompositeSleepSensorSource @Inject constructor(
     override fun collectLatestEpochReading(windowStartMs: Long, windowEndMs: Long): EpochReading {
         return activeDelegate.collectLatestEpochReading(windowStartMs, windowEndMs)
     }
+
+    override fun drainDetectedSoundEvents(): List<DetectedSoundEvent> {
+        return activeDelegate.drainDetectedSoundEvents()
+    }
 }
+
+// 2. Bổ sung vào cuối class SonarSleepSensorSource (trước dấu } cuối tệp SonarSleepSensorSource.kt):
+/*
+    override fun drainDetectedSoundEvents(): List<DetectedSoundEvent> {
+        return if (!runningNative) passiveFallback.drainDetectedSoundEvents() else emptyList()
+    }
+*/

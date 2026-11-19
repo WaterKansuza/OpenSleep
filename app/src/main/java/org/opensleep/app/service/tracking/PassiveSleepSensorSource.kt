@@ -13,7 +13,9 @@ import android.media.MediaRecorder
 import androidx.core.content.ContextCompat
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.*
+import org.opensleep.app.data.local.db.SoundCategory
 import org.opensleep.app.data.local.db.TrackingMode
+import org.opensleep.app.service.audio.NightSoundClassifier
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.math.log10
@@ -22,7 +24,8 @@ import kotlin.math.sqrt
 
 @Singleton
 class PassiveSleepSensorSource @Inject constructor(
-    @ApplicationContext private val context: Context
+    @ApplicationContext private val context: Context,
+    private val nightSoundClassifier: NightSoundClassifier
 ) : SleepSensorSource, SensorEventListener {
 
     override val mode: TrackingMode = TrackingMode.PASSIVE
@@ -33,11 +36,9 @@ class PassiveSleepSensorSource @Inject constructor(
     private var audioJob: Job? = null
     private val audioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    // Bộ lọc trọng lực cho gia tốc kế (High-pass alpha)
     private val gravity = FloatArray(3)
     private var isGravityInitialized = false
 
-    // Biến tích lũy cho cửa sổ 30 giây (được bảo vệ bởi lock)
     private val lock = Any()
     private var motionSum = 0.0
     private var motionPeak = 0f
@@ -46,16 +47,38 @@ class PassiveSleepSensorSource @Inject constructor(
     private var soundEnergyPeakDb = -90f
     private var soundActiveFrames = 0
     private var soundTotalFrames = 0
-    private var adaptiveNoiseFloorDb = -55f
+
+    private val calibrationSamplesDb = mutableListOf<Float>()
+    private var isNoiseCalibrated = false
+    private var adaptiveNoiseFloorDb = -48f
+
+    private val audioRing15600 = FloatArray(NightSoundClassifier.REQUIRED_SAMPLES_16KHZ)
+    private var ringWritePos = 0
+    private var ringSampleCount = 0
+    private var lastSoundClassifiedMs = 0L
+    private val detectedEvents = mutableListOf<DetectedSoundEvent>()
 
     companion object {
         private const val SAMPLE_RATE_HZ = 16_000
         private const val GRAVITY_ALPHA = 0.85f
-        private const val MOTION_SCALE = 1.8f // Chuẩn hóa dao động trên nệm về [0..1+]
+        private const val MOTION_SCALE = 1.8f
+        private const val CALIBRATION_FRAMES_TARGET = 468
+        private const val SOUND_TRANSIENT_MARGIN_DB = 12f
+        private const val MAX_SOUND_CONTRIBUTION = 0.15f
+        private const val SOUND_CLASSIFY_COOLDOWN_MS = 12_000L
     }
 
     override suspend fun start() {
         resetAccumulators()
+        synchronized(lock) {
+            calibrationSamplesDb.clear()
+            isNoiseCalibrated = false
+            adaptiveNoiseFloorDb = -48f
+            ringWritePos = 0
+            ringSampleCount = 0
+            lastSoundClassifiedMs = 0L
+            detectedEvents.clear()
+        }
         isGravityInitialized = false
 
         accelerometer?.let {
@@ -63,6 +86,9 @@ class PassiveSleepSensorSource @Inject constructor(
         }
 
         if (hasMicPermission()) {
+            withContext(Dispatchers.IO) {
+                nightSoundClassifier.initialize()
+            }
             startPassiveAudioMonitor()
         }
     }
@@ -88,7 +114,6 @@ class PassiveSleepSensorSource @Inject constructor(
             return
         }
 
-        // Tách thành phần trọng lực tĩnh để chỉ lấy gia tốc chuyển động
         gravity[0] = GRAVITY_ALPHA * gravity[0] + (1f - GRAVITY_ALPHA) * x
         gravity[1] = GRAVITY_ALPHA * gravity[1] + (1f - GRAVITY_ALPHA) * y
         gravity[2] = GRAVITY_ALPHA * gravity[2] + (1f - GRAVITY_ALPHA) * z
@@ -97,8 +122,6 @@ class PassiveSleepSensorSource @Inject constructor(
         val ly = y - gravity[1]
         val lz = z - gravity[2]
         val linearMagnitude = sqrt(lx * lx + ly * ly + lz * lz)
-
-        // Lọc nhiễu vi mạch cảm biến (< 0.03 m/s^2)
         val cleanMotion = if (linearMagnitude < 0.03f) 0f else linearMagnitude
 
         synchronized(lock) {
@@ -145,17 +168,55 @@ class PassiveSleepSensorSource @Inject constructor(
                 while (isActive) {
                     val readCount = recorder.read(pcmBuffer, 0, frameSize)
                     if (readCount > 0) {
+                        appendSamplesToRing(pcmBuffer, readCount)
                         val db = computeRmsDb(pcmBuffer, readCount)
+                        var snapshotToClassify: FloatArray? = null
+
                         synchronized(lock) {
-                            // Cập nhật nền ồn môi trường từ từ (quạt, điều hòa)
-                            if (db < adaptiveNoiseFloorDb + 6f) {
-                                adaptiveNoiseFloorDb = 0.98f * adaptiveNoiseFloorDb + 0.02f * db
+                            if (!isNoiseCalibrated) {
+                                calibrationSamplesDb.add(db)
+                                if (calibrationSamplesDb.size >= CALIBRATION_FRAMES_TARGET) {
+                                    val sorted = calibrationSamplesDb.sorted()
+                                    val p75Idx = ((sorted.size - 1) * 0.75f).toInt()
+                                    adaptiveNoiseFloorDb = sorted[p75Idx]
+                                    isNoiseCalibrated = true
+                                    calibrationSamplesDb.clear()
+                                }
+                            } else {
+                                if (db <= adaptiveNoiseFloorDb + 8f) {
+                                    val alpha = if (db < adaptiveNoiseFloorDb) 0.08f else 0.03f
+                                    adaptiveNoiseFloorDb = (1f - alpha) * adaptiveNoiseFloorDb + alpha * db
+                                }
+                                if (db > adaptiveNoiseFloorDb + SOUND_TRANSIENT_MARGIN_DB) {
+                                    soundActiveFrames++
+                                    val nowMs = System.currentTimeMillis()
+                                    if (ringSampleCount >= NightSoundClassifier.REQUIRED_SAMPLES_16KHZ &&
+                                        nowMs - lastSoundClassifiedMs >= SOUND_CLASSIFY_COOLDOWN_MS
+                                    ) {
+                                        lastSoundClassifiedMs = nowMs
+                                        snapshotToClassify = snapshotOrderedRing()
+                                    }
+                                }
                             }
                             if (db > soundEnergyPeakDb) soundEnergyPeakDb = db
-                            if (db > adaptiveNoiseFloorDb + 8f) {
-                                soundActiveFrames++
-                            }
                             soundTotalFrames++
+                        }
+
+                        snapshotToClassify?.let { window ->
+                            val result = nightSoundClassifier.classifyWindow(window)
+                            if (result != null && result.category != SoundCategory.UNKNOWN) {
+                                synchronized(lock) {
+                                    detectedEvents.add(
+                                        DetectedSoundEvent(
+                                            timestampMs = System.currentTimeMillis(),
+                                            durationSeconds = 2,
+                                            category = result.category,
+                                            confidence = result.confidence,
+                                            decibelPeak = db
+                                        )
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -168,26 +229,54 @@ class PassiveSleepSensorSource @Inject constructor(
         }
     }
 
+    private fun appendSamplesToRing(pcm: ShortArray, count: Int) {
+        val len = audioRing15600.size
+        for (i in 0 until count) {
+            audioRing15600[ringWritePos] = pcm[i] / 32768.0f
+            ringWritePos = (ringWritePos + 1) % len
+            if (ringSampleCount < len) ringSampleCount++
+        }
+    }
+
+    private fun snapshotOrderedRing(): FloatArray {
+        val len = audioRing15600.size
+        val out = FloatArray(len)
+        val firstChunk = len - ringWritePos
+        System.arraycopy(audioRing15600, ringWritePos, out, 0, firstChunk)
+        if (ringWritePos > 0) {
+            System.arraycopy(audioRing15600, 0, out, firstChunk, ringWritePos)
+        }
+        return out
+    }
+
+    override fun drainDetectedSoundEvents(): List<DetectedSoundEvent> {
+        synchronized(lock) {
+            if (detectedEvents.isEmpty()) return emptyList()
+            val copy = detectedEvents.toList()
+            detectedEvents.clear()
+            return copy
+        }
+    }
+
     override fun collectLatestEpochReading(windowStartMs: Long, windowEndMs: Long): EpochReading {
         val avgMotion: Float
         val peakMotion: Float
         val peakDb: Float
         val soundActiveRatio: Float
-
+        val calibrated: Boolean
         synchronized(lock) {
             avgMotion = if (motionSampleCount > 0) (motionSum / motionSampleCount).toFloat() else 0f
             peakMotion = motionPeak
             peakDb = soundEnergyPeakDb
-            soundActiveRatio = if (soundTotalFrames > 0) {
+            calibrated = isNoiseCalibrated
+            soundActiveRatio = if (calibrated && soundTotalFrames > 0) {
                 soundActiveFrames.toFloat() / soundTotalFrames.toFloat()
             } else 0f
-
             resetAccumulators()
         }
 
-        // Tổng hợp chỉ số chuyển động từ Gia tốc kế + Xung âm thanh đột ngột
         val accelScore = (avgMotion * 0.6f + peakMotion * 0.4f) / MOTION_SCALE
-        val soundContribution = (soundActiveRatio * 0.65f).coerceIn(0f, 0.5f)
+        val soundContribution = (soundActiveRatio * 0.35f).coerceIn(0f, MAX_SOUND_CONTRIBUTION)
         val combinedMotion = (accelScore + soundContribution).coerceIn(0f, 1.5f)
 
         return EpochReading(
@@ -195,7 +284,7 @@ class PassiveSleepSensorSource @Inject constructor(
             motionIntensity = combinedMotion,
             soundEnergyDb = peakDb,
             breathingRateBpm = null,
-            confidence = if (accelerometer != null) 0.85f else 0.65f
+            confidence = if (accelerometer != null) 0.88f else 0.70f
         )
     }
 

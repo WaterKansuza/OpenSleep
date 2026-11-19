@@ -1,94 +1,293 @@
 package org.opensleep.app.ui.dashboard
 
+import android.content.Context
+import android.content.Intent
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
-import org.opensleep.app.data.local.db.AgeGroup
 import org.opensleep.app.data.local.db.SessionType
 import org.opensleep.app.data.local.db.WakeMode
-import org.opensleep.app.data.local.db.entity.AlarmConfigEntity
-import org.opensleep.app.data.local.db.entity.UserSleepProfileEntity
 import org.opensleep.app.data.local.db.dao.AlarmDao
 import org.opensleep.app.data.local.db.dao.SleepSessionDao
-import org.opensleep.app.data.local.db.dao.SleepDebtDao
+import org.opensleep.app.data.local.db.entity.AlarmConfigEntity
+import org.opensleep.app.data.local.db.entity.DreamJournalEntity
+import org.opensleep.app.data.local.db.entity.MoodEntryEntity
+import org.opensleep.app.data.local.db.entity.SessionNoteCrossRef
+import org.opensleep.app.data.local.db.entity.SleepNoteEntity
 import org.opensleep.app.data.repository.SleepDebtRepository
-import org.opensleep.app.domain.model.CircadianForecast
+import org.opensleep.app.data.repository.UserPreferencesRepository
+import org.opensleep.app.domain.engine.SleepDebtEngine
+import org.opensleep.app.domain.engine.WakeTimePlannerEngine
+import org.opensleep.app.domain.model.BedtimeRecommendation
 import org.opensleep.app.domain.model.SleepDebtAnalysis
+import org.opensleep.app.service.alarm.AlarmScheduler
+import org.opensleep.app.service.tracking.NightTimeService
+import org.opensleep.app.service.tracking.SonarSleepSensorSource
 import org.opensleep.app.service.tracking.TrackingStateHolder
 import org.opensleep.app.service.tracking.TrackingUiState
 import java.time.LocalDate
 import javax.inject.Inject
 
-data class BedtimeConfigState(
-    val wakeMode: WakeMode = WakeMode.NATURAL_NO_ALARM,
-    val alarmHour: Int = 7,
-    val alarmMinute: Int = 0,
-    val smartWakeWindowMinutes: Int = 30
-)
+enum class TodaySleepModeOption {
+    ALARM,
+    NO_ALARM,
+    NAP
+}
 
 data class TodayUiState(
     val analysis: SleepDebtAnalysis? = null,
-    val profile: UserSleepProfileEntity? = null,
-    val trackingState: TrackingUiState = TrackingUiState(),
-    val bedtimeConfig: BedtimeConfigState = BedtimeConfigState(),
-    val activeAlarm: AlarmConfigEntity? = null,
-    val simulatedPaybackMinutes: Int = 0  // Slider giả lập trả nợ
+    val recommendation: BedtimeRecommendation? = null,
+    val selectedSleepMode: TodaySleepModeOption = TodaySleepModeOption.ALARM,
+    val smartWakeEnabled: Boolean = true,
+    val effectiveSmartWindowMin: Int = 30,
+    val optionalCheckInEnabled: Boolean = false,
+    val tracking: TrackingUiState = TrackingUiState(),
+    val availableNotes: List<SleepNoteEntity> = emptyList(),
+    val pendingCheckInSessionId: Long? = null
 )
 
 @HiltViewModel
 class TodayViewModel @Inject constructor(
+    @ApplicationContext private val context: Context,
     private val sleepDebtRepository: SleepDebtRepository,
-    private val trackingStateHolder: TrackingStateHolder,
+    private val sleepDebtEngine: SleepDebtEngine,
+    private val wakeTimePlannerEngine: WakeTimePlannerEngine,
+    private val userPreferencesRepository: UserPreferencesRepository,
+    private val sleepSessionDao: SleepSessionDao,
     private val alarmDao: AlarmDao,
-    private val sleepDebtDao: SleepDebtDao
+    private val alarmScheduler: AlarmScheduler,
+    private val trackingStateHolder: TrackingStateHolder,
+    sonarSensorSource: SonarSleepSensorSource
 ) : ViewModel() {
 
-    val uiState: StateFlow<TodayUiState> = combine(
-        sleepDebtRepository.observeCurrentAnalysis(),
-        sleepDebtRepository.observeProfile(),
-        trackingStateHolder.state,
-        alarmDao.observeActiveAlarm()
-    ) { analysis, profile, tracking, alarm ->
-        val wakeMode = if (alarm != null) WakeMode.HARD_ALARM else WakeMode.NATURAL_NO_ALARM
-        val alarmConfig = if (alarm != null) BedtimeConfigState(
-            wakeMode = wakeMode,
-            alarmHour = alarm.alarmHour,
-            alarmMinute = alarm.alarmMinute,
-            smartWakeWindowMinutes = alarm.smartWakeWindowMinutes
-        ) else BedtimeConfigState(wakeMode = WakeMode.NATURAL_NO_ALARM)
+    private val todayEpochFlow = MutableStateFlow(LocalDate.now().toEpochDay())
+    private val selectedModeFlow = MutableStateFlow(TodaySleepModeOption.ALARM)
 
-        TodayUiState(
-            analysis = analysis,
-            profile = profile,
-            trackingState = tracking,
-            bedtimeConfig = alarmConfig,
-            activeAlarm = alarm
-        )
-    }.stateIn(
-        scope = viewModelScope,
-        started = SharingStarted.WhileSubscribed(5_000),
-        initialValue = TodayUiState()
-    )
+    val liveWaveFlow: SharedFlow<Float> = sonarSensorSource.liveWaveFlow
 
-    // Slider giả lập: bao nhiêu phút ngủ bù sẽ trả được bao nhiêu nợ
-    private val _simulatedPayback = MutableStateFlow(0)
-    val simulatedPaybackMinutes: StateFlow<Int> = _simulatedPayback.asStateFlow()
-
-    fun setSimulatedPayback(minutes: Int) {
-        _simulatedPayback.value = minutes
-    }
-
-    fun clearPendingCheckIn() {
-        trackingStateHolder.clearPendingCheckIn()
-    }
-
-    fun saveMorningCheckIn(sessionId: Long, rating: Int, notes: List<Long>) {
-        viewModelScope.launch {
-            val dao = sleepDebtDao
-            // Update rating on the session via repository
-            sleepDebtRepository.recalculateAfterSessionChange(LocalDate.now().toEpochDay())
+    fun refreshTodayIfNeeded() {
+        val nowEpoch = LocalDate.now().toEpochDay()
+        if (todayEpochFlow.value != nowEpoch) {
+            todayEpochFlow.value = nowEpoch
         }
+    }
+
+    init {
+        viewModelScope.launch {
+            val prefs = userPreferencesRepository.getSnapshot()
+            selectedModeFlow.value = if (prefs.defaultUseAlarm) {
+                TodaySleepModeOption.ALARM
+            } else {
+                TodaySleepModeOption.NO_ALARM
+            }
+        }
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val uiState: StateFlow<TodayUiState> = todayEpochFlow.flatMapLatest { todayEpoch ->
+        combine(
+            sleepDebtRepository.observeCurrentAnalysis(todayEpoch),
+            sleepSessionDao.observeSessionsInRange(todayEpoch - 21, todayEpoch),
+            userPreferencesRepository.preferencesFlow,
+            trackingStateHolder.state,
+            selectedModeFlow,
+            sleepSessionDao.observeAllNotes()
+        ) { array ->
+            val analysis = array[0] as SleepDebtAnalysis
+            @Suppress("UNCHECKED_CAST")
+            val sessions = array[1] as List<org.opensleep.app.data.local.db.entity.SleepSessionEntity>
+            val prefs = array[2] as org.opensleep.app.data.repository.UserPreferencesState
+            val tracking = array[3] as TrackingUiState
+            val mode = array[4] as TodaySleepModeOption
+            @Suppress("UNCHECKED_CAST")
+            val notes = array[5] as List<SleepNoteEntity>
+
+            val recommendation = wakeTimePlannerEngine.computeRecommendation(
+                prefs = prefs,
+                personalSleepNeedMinutes = analysis.activeSleepNeedMinutes,
+                recentSessions = sessions,
+                estimatedDebtMinutes = analysis.cumulativeDebtMinutes,
+                today = LocalDate.ofEpochDay(todayEpoch)
+            )
+            val effWindow = sleepDebtEngine.computeDebtAwareSmartWindow(
+                baseWindowMinutes = if (prefs.smartWakeEnabled) 30 else 0,
+                debtAwareOverride = true,
+                cumulativeDebtMinutes = analysis.cumulativeDebtMinutes
+            )
+
+            TodayUiState(
+                analysis = analysis,
+                recommendation = recommendation,
+                selectedSleepMode = mode,
+                smartWakeEnabled = prefs.smartWakeEnabled,
+                effectiveSmartWindowMin = effWindow,
+                optionalCheckInEnabled = prefs.optionalCheckInEnabled,
+                tracking = tracking,
+                availableNotes = notes,
+                pendingCheckInSessionId = tracking.pendingCheckInSessionId
+            )
+        }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), TodayUiState())
+
+    fun selectSleepMode(option: TodaySleepModeOption) {
+        selectedModeFlow.value = option
+        if (option != TodaySleepModeOption.NAP) {
+            viewModelScope.launch {
+                userPreferencesRepository.setDefaultSleepMode(
+                    useAlarm = option == TodaySleepModeOption.ALARM,
+                    smartWakeEnabled = uiState.value.smartWakeEnabled
+                )
+            }
+        }
+    }
+
+    fun updateActiveWakeTime(hour: Int, minute: Int) {
+        viewModelScope.launch {
+            val isWeekend = uiState.value.recommendation?.isWeekendScheduleApplied == true
+            if (isWeekend) {
+                userPreferencesRepository.setWeekendSchedule(true, hour, minute)
+            } else {
+                userPreferencesRepository.setWeekdayWakeTime(hour, minute)
+            }
+        }
+    }
+
+    fun setSmartWakeEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            val useAlarm = selectedModeFlow.value == TodaySleepModeOption.ALARM
+            userPreferencesRepository.setDefaultSleepMode(useAlarm, enabled)
+        }
+    }
+
+    fun startSelectedSleep() {
+        when (selectedModeFlow.value) {
+            TodaySleepModeOption.NAP -> startPowerNap()
+            TodaySleepModeOption.ALARM -> startNightSleep(useAlarm = true)
+            TodaySleepModeOption.NO_ALARM -> startNightSleep(useAlarm = false)
+        }
+    }
+
+    private fun startNightSleep(useAlarm: Boolean) {
+        viewModelScope.launch {
+            val rec = uiState.value.recommendation
+            val wakeMin = rec?.targetWakeMinutesOfDay ?: (6 * 60 + 45)
+            val wakeHour = wakeMin / 60
+            val wakeMinute = wakeMin % 60
+            val smartOn = uiState.value.smartWakeEnabled
+
+            val wakeMode = if (useAlarm) WakeMode.HARD_ALARM else WakeMode.NATURAL_NO_ALARM
+            if (useAlarm) {
+                val existingId = alarmDao.observeAlarms().firstOrNull()
+                    ?.firstOrNull { it.label == "Báo thức ngủ đêm" }?.id ?: 0L
+                val alarm = AlarmConfigEntity(
+                    id = existingId,
+                    label = "Báo thức ngủ đêm",
+                    hour = wakeHour,
+                    minute = wakeMinute,
+                    isEnabled = true,
+                    smartWindowMinutes = if (smartOn) 30 else 0,
+                    debtAwareOverride = true
+                )
+                val alarmId = alarmDao.upsertAlarm(alarm)
+                alarmScheduler.scheduleAlarm(alarm.copy(id = alarmId))
+                trackingStateHolder.update { it.copy(activeAlarmId = alarmId) }
+            }
+
+            val intent = Intent(context, NightTimeService::class.java).apply {
+                action = NightTimeService.ACTION_START_TRACKING
+                putExtra(NightTimeService.EXTRA_SESSION_TYPE, SessionType.NIGHT.name)
+                putExtra(NightTimeService.EXTRA_WAKE_MODE, wakeMode.name)
+            }
+            ContextCompat.startForegroundService(context, intent)
+        }
+    }
+
+    fun startPowerNap() {
+        val intent = Intent(context, NightTimeService::class.java).apply {
+            action = NightTimeService.ACTION_START_TRACKING
+            putExtra(NightTimeService.EXTRA_SESSION_TYPE, SessionType.NAP.name)
+            putExtra(NightTimeService.EXTRA_WAKE_MODE, WakeMode.NATURAL_NO_ALARM.name)
+        }
+        ContextCompat.startForegroundService(context, intent)
+    }
+
+    fun stopTracking() {
+        val intent = Intent(context, NightTimeService::class.java).apply {
+            action = NightTimeService.ACTION_STOP_TRACKING
+        }
+        context.startService(intent)
+    }
+
+    fun submitQuickFeeling(sessionId: Long, energyScore: Int) {
+        viewModelScope.launch {
+            val session = sleepSessionDao.getSessionById(sessionId)
+            if (session != null) {
+                sleepSessionDao.updateSession(session.copy(sleepRating = energyScore))
+                sleepSessionDao.insertMood(
+                    MoodEntryEntity(
+                        sessionId = sessionId,
+                        dateEpochDay = session.referenceDateEpochDay,
+                        morningEnergyScore = energyScore,
+                        moodLabel = if (energyScore >= 4) "Khỏe khoắn" else "Vẫn mệt",
+                        createdAtMs = System.currentTimeMillis()
+                    )
+                )
+                sleepDebtRepository.recalculateAfterSessionChange(session.referenceDateEpochDay)
+            }
+            trackingStateHolder.clearPendingCheckIn()
+        }
+    }
+
+    fun submitMorningCheckIn(
+        sessionId: Long,
+        energyScore: Int,
+        selectedNoteIds: Set<Long>,
+        dreamContent: String
+    ) {
+        viewModelScope.launch {
+            val session = sleepSessionDao.getSessionById(sessionId)
+            if (session != null) {
+                sleepSessionDao.updateSession(session.copy(sleepRating = energyScore))
+                sleepSessionDao.insertMood(
+                    MoodEntryEntity(
+                        sessionId = sessionId,
+                        dateEpochDay = session.referenceDateEpochDay,
+                        morningEnergyScore = energyScore,
+                        moodLabel = when (energyScore) {
+                            5 -> "Rất tỉnh táo"
+                            4 -> "Khỏe khoắn"
+                            3 -> "Bình thường"
+                            2 -> "Hơi uể oải"
+                            else -> "Kiệt sức"
+                        },
+                        createdAtMs = System.currentTimeMillis()
+                    )
+                )
+                selectedNoteIds.forEach { noteId ->
+                    sleepSessionDao.attachNoteToSession(SessionNoteCrossRef(sessionId, noteId))
+                }
+                if (dreamContent.isNotBlank()) {
+                    sleepSessionDao.insertDream(
+                        DreamJournalEntity(
+                            sessionId = sessionId,
+                            dateEpochDay = session.referenceDateEpochDay,
+                            content = dreamContent.trim(),
+                            createdAtMs = System.currentTimeMillis()
+                        )
+                    )
+                }
+                sleepDebtRepository.recalculateAfterSessionChange(session.referenceDateEpochDay)
+            }
+            trackingStateHolder.clearPendingCheckIn()
+        }
+    }
+
+    fun dismissMorningCheckIn() {
+        trackingStateHolder.clearPendingCheckIn()
     }
 }

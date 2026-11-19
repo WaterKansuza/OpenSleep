@@ -38,7 +38,7 @@ class SleepStagingEngineTest {
 
     @Test
     fun `stillness with high breathing variability detects REM sleep`() {
-        val bpmSeries = listOf(12.5f, 16.0f, 13.0f, 17.5f, 14.0f, 18.0f)
+        val bpmSeries = listOf(12.5f, 16.0f, 13.0f, 17.5f, 14.0f, 18.0f, 13.5f)
         val history = bpmSeries.dropLast(1).map { bpm ->
             mockEpoch(SleepStage.LIGHT, motion = 0.01f, bpm = bpm)
         }

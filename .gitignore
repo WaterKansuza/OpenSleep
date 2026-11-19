@@ -13,3 +13,12 @@
 .externalNativeBuild
 .cxx
 local.properties
+
+OpenSleep_Product_Roadmap.md
+
+# Bảo mật khóa ký Release (tuyệt đối không commit)
+keystore.properties
+*.jks
+*.keystore
+ 
+SECRET.md
