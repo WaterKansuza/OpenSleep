@@ -112,8 +112,8 @@ class SleepDebtEngineTest {
         }
         val newNeed = engine.autoCalibrateSleepNeed(currentNeedMinutes = 480, recentSessions = sessions, recentMoods = emptyList())
 
-        // Chênh 60p * 0.20 = +12p (nằm trong giới hạn bước nhảy ±15p)
-        assertEquals(492, newNeed)
+        // Chênh 60p * 0.25 = +15p (nằm trong giới hạn bước nhảy ±15p)
+        assertEquals(495, newNeed)
     }
 
     private fun mockSession(

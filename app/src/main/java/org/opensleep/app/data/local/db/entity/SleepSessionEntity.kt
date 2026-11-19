@@ -5,6 +5,7 @@ import androidx.room.Index
 import androidx.room.PrimaryKey
 import org.opensleep.app.data.local.db.SessionType
 import org.opensleep.app.data.local.db.TrackingMode
+import org.opensleep.app.data.local.db.WakeMode
 
 @Entity(
     tableName = "sleep_session",
@@ -15,6 +16,7 @@ data class SleepSessionEntity(
     val referenceDateEpochDay: Long,    // Ngày thức dậy (LocalDate.toEpochDay) dùng gom nhóm nợ ngủ
     val sessionType: SessionType = SessionType.NIGHT,
     val trackingMode: TrackingMode = TrackingMode.PASSIVE,
+    val wakeMode: WakeMode = WakeMode.NATURAL_NO_ALARM,
     val startTimeMs: Long,              // Lúc bấm "Bắt đầu ngủ" (UTC millis)
     val endTimeMs: Long,                // Lúc tắt tracking / dậy hẳn
     val asleepTimeMs: Long,             // Lúc thực sự thiếp đi

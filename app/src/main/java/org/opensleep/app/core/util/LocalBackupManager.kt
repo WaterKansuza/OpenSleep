@@ -18,7 +18,7 @@ import javax.inject.Singleton
 
 @Serializable
 data class BackupPayload(
-    val schemaVersion: Int = 1,
+    val schemaVersion: Int = 2,
     val exportedAtMs: Long,
     val ageGroup: AgeGroup,
     val targetSleepNeedMinutes: Int,
@@ -33,6 +33,7 @@ data class BackupSessionDto(
     val referenceDateEpochDay: Long,
     val sessionType: SessionType,
     val trackingMode: TrackingMode,
+    val wakeMode: WakeMode = WakeMode.NATURAL_NO_ALARM,
     val startTimeMs: Long,
     val endTimeMs: Long,
     val asleepTimeMs: Long,
@@ -74,6 +75,7 @@ class LocalBackupManager @Inject constructor(
                         referenceDateEpochDay = s.referenceDateEpochDay,
                         sessionType = s.sessionType,
                         trackingMode = s.trackingMode,
+                        wakeMode = s.wakeMode,
                         startTimeMs = s.startTimeMs,
                         endTimeMs = s.endTimeMs,
                         asleepTimeMs = s.asleepTimeMs,
@@ -128,6 +130,7 @@ class LocalBackupManager @Inject constructor(
                             referenceDateEpochDay = dto.referenceDateEpochDay,
                             sessionType = dto.sessionType,
                             trackingMode = dto.trackingMode,
+                            wakeMode = dto.wakeMode,
                             startTimeMs = dto.startTimeMs,
                             endTimeMs = dto.endTimeMs,
                             asleepTimeMs = dto.asleepTimeMs,
