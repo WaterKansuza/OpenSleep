@@ -1,5 +1,9 @@
 package org.opensleep.app.ui.history
 
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -8,12 +12,16 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.Delete
+import androidx.compose.material.icons.rounded.Download
+import androidx.compose.material.icons.rounded.WarningAmber
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -33,6 +41,10 @@ import org.opensleep.app.data.local.db.entity.DailySleepDebtSnapshotEntity
 import org.opensleep.app.data.local.db.entity.SleepEpochEntity
 import org.opensleep.app.data.local.db.entity.SleepSessionEntity
 import org.opensleep.app.data.local.db.entity.SoundEventEntity
+import org.opensleep.app.domain.model.SleepHealthReport
+import org.opensleep.app.domain.model.SleepHealthWarning
+import org.opensleep.app.domain.model.SleepQualityMetrics
+import org.opensleep.app.domain.model.WarningSeverity
 import org.opensleep.app.ui.theme.SleepPalette
 import org.opensleep.app.ui.theme.displayLabel
 import org.opensleep.app.ui.theme.stageColor
@@ -40,23 +52,40 @@ import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
-import androidx.compose.foundation.lazy.rememberLazyListState
+import kotlin.math.max
+import kotlin.math.roundToInt
 
 data class DaySleepStripItem(
     val epochDay: Long,
     val date: LocalDate,
     val totalSleepMinutes: Int,
-    val targetNeedMinutes: Int
+    val targetNeedMinutes: Int,
+    val isDemoData: Boolean = false
 )
 
 @Composable
 fun HistoryDetailRoute(
     uiState: HistoryUiState,
     onSelectDay: (Long) -> Unit,
-    onLogManualSleep: (Int, WakeMode, Boolean) -> Unit,
+    onLogManualSleep: (Int, Int, Int, Int, WakeMode, Boolean) -> Unit,
+    onDeleteSession: (SleepSessionEntity) -> Unit,
+    onSelectReportRange: (ReportRangeOption) -> Unit,
+    onDismissWarning: (String) -> Unit,
+    onExportCsv: (Uri) -> Unit,
+    onExportPdf: (Uri) -> Unit,
+    onClearExportMessage: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    var subTab by remember { mutableStateOf(0) } // 0 = Từng đêm, 1 = Báo cáo & Đều đặn
     var showManualDialog by remember { mutableStateOf(false) }
+
+    val csvLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("text/csv")
+    ) { uri -> uri?.let(onExportCsv) }
+
+    val pdfLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/pdf")
+    ) { uri -> uri?.let(onExportPdf) }
 
     Column(
         modifier = modifier
@@ -72,56 +101,109 @@ fun HistoryDetailRoute(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                text = "Lịch sử từng ngày",
+                text = "Chi tiết & Báo cáo",
                 style = MaterialTheme.typography.titleLarge,
                 fontWeight = FontWeight.Bold,
-                color = Color.White
+                color = SleepPalette.OnBackground
             )
-            FilledTonalButton(onClick = { showManualDialog = true }) {
-                Icon(Icons.Rounded.Add, contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(4.dp))
-                Text("Ghi bù")
-            }
-        }
-
-        // Dải chọn từng ngày: hiển thị mỗi ngày ngủ mấy tiếng
-        DailyHoursStrip(
-            days = uiState.daysStrip,
-            selectedEpochDay = uiState.selectedEpochDay,
-            onSelectDay = onSelectDay
-        )
-
-        val session = uiState.selectedSession
-        if (session == null) {
-            Card(
-                colors = CardDefaults.cardColors(containerColor = SleepPalette.SurfaceCard),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Chưa có bản ghi giấc ngủ cho ngày này.", color = Color.LightGray)
-                    TextButton(onClick = { showManualDialog = true }) {
-                        Text("+ Nhập thủ công hoặc tạo dữ liệu mẫu để xem biểu đồ")
-                    }
+            if (subTab == 0) {
+                FilledTonalButton(onClick = { showManualDialog = true }) {
+                    Icon(Icons.Rounded.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Ghi bù")
                 }
             }
-        } else {
-            SessionSummaryCard(session = session)
-            SleepStages4TierCard(epochs = uiState.selectedEpochs)
-            StageBreakdownCard(session = session)
-            if (uiState.selectedSoundEvents.isNotEmpty()) {
-                SoundEventsCard(events = uiState.selectedSoundEvents)
+        }
+
+        // Chuyển giữa Từng đêm và Báo cáo & Đều đặn
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            FilterChip(
+                selected = subTab == 0,
+                onClick = { subTab = 0 },
+                label = { Text("Từng đêm") }
+            )
+            FilterChip(
+                selected = subTab == 1,
+                onClick = { subTab = 1 },
+                label = { Text("Báo cáo & Đều đặn") }
+            )
+        }
+
+        uiState.exportStatusMessage?.let { msg ->
+            Card(colors = CardDefaults.cardColors(containerColor = SleepPalette.SurfaceElevated)) {
+                Row(
+                    Modifier.padding(12.dp).fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(msg, color = SleepPalette.OptimalGreen, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                    TextButton(onClick = onClearExportMessage) { Text("Đóng") }
+                }
             }
         }
 
-        if (uiState.debtSnapshots14Days.isNotEmpty()) {
-            DebtTrend14DayCard(snapshots = uiState.debtSnapshots14Days)
+        if (subTab == 0) {
+            DailyHoursStrip(
+                days = uiState.daysStrip,
+                selectedEpochDay = uiState.selectedEpochDay,
+                onSelectDay = onSelectDay
+            )
+
+            val session = uiState.selectedSession
+            val metrics = uiState.selectedQualityMetrics
+            if (session == null || metrics == null) {
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = SleepPalette.SurfaceCard),
+                    shape = RoundedCornerShape(24.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("Chưa có bản ghi giấc ngủ cho ngày này.", color = SleepPalette.OnBackgroundMuted)
+                        TextButton(onClick = { showManualDialog = true }) {
+                            Text("+ Nhập thủ công giấc ngủ")
+                        }
+                    }
+                }
+            } else {
+                SessionSummaryWithQualityCard(
+                    session = session,
+                    metrics = metrics,
+                    onDelete = { onDeleteSession(session) }
+                )
+                if (uiState.selectedEpochs.isNotEmpty()) {
+                    SleepStages4TierCard(epochs = uiState.selectedEpochs, isDemo = uiState.selectedSessionIsDemo)
+                }
+                StageBreakdownCard(session = session)
+                if (uiState.selectedSoundEvents.isNotEmpty()) {
+                    SoundEventsCard(events = uiState.selectedSoundEvents)
+                }
+            }
+
+            if (uiState.debtSnapshots14Days.isNotEmpty()) {
+                DebtTrendAndSimulatorCard(snapshots = uiState.debtSnapshots14Days)
+            }
+        } else {
+            ReportAndRegularityTab(
+                uiState = uiState,
+                onSelectReportRange = onSelectReportRange,
+                onDismissWarning = onDismissWarning,
+                onLaunchCsvExport = {
+                    csvLauncher.launch("opensleep_report_${LocalDate.now()}.csv")
+                },
+                onLaunchPdfExport = {
+                    pdfLauncher.launch("opensleep_report_${LocalDate.now()}.pdf")
+                }
+            )
         }
     }
 
     if (showManualDialog) {
         ManualSleepEntryDialog(
-            onSave = { mins, mode, demo ->
-                onLogManualSleep(mins, mode, demo)
+            onSave = { bedH, bedM, wakeH, wakeM, mode, demo ->
+                onLogManualSleep(bedH, bedM, wakeH, wakeM, mode, demo)
                 showManualDialog = false
             },
             onDismiss = { showManualDialog = false }
@@ -130,15 +212,13 @@ fun HistoryDetailRoute(
 }
 
 @Composable
-fun DailyHoursStrip(
+private fun DailyHoursStrip(
     days: List<DaySleepStripItem>,
     selectedEpochDay: Long,
     onSelectDay: (Long) -> Unit
 ) {
     val dowFmt = remember { DateTimeFormatter.ofPattern("EE") }
     val listState = rememberLazyListState()
-
-    // Tự động cuộn để focus ngày đang chọn (mặc định là Hôm nay ở cuối dải)
     LaunchedEffect(days.size, selectedEpochDay) {
         val targetIdx = days.indexOfFirst { it.epochDay == selectedEpochDay }
         if (targetIdx >= 0) {
@@ -148,19 +228,19 @@ fun DailyHoursStrip(
 
     LazyRow(
         state = listState,
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        modifier = Modifier.fillMaxWidth()
     ) {
-        items(days, key = { it.epochDay }) { item ->
+        items(days) { item ->
             val isSelected = item.epochDay == selectedEpochDay
-            val met = item.totalSleepMinutes >= item.targetNeedMinutes
+            val hours = item.totalSleepMinutes / 60f
+            val metTarget = item.totalSleepMinutes >= item.targetNeedMinutes
             Surface(
                 shape = RoundedCornerShape(16.dp),
-                color = if (isSelected) Color(0xFF27272A) else SleepPalette.SurfaceCard,
-                border = if (isSelected) {
-                    androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFE4E4E7).copy(alpha = 0.45f))
-                } else null,
+                color = if (isSelected) SleepPalette.PrimaryBlueDim else SleepPalette.SurfaceCard,
+                border = if (isSelected) BorderStroke(1.dp, Color.White.copy(alpha = 0.35f)) else null,
                 modifier = Modifier
-                    .width(68.dp)
+                    .width(70.dp)
                     .clickable { onSelectDay(item.epochDay) }
             ) {
                 Column(
@@ -168,13 +248,31 @@ fun DailyHoursStrip(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    Text(item.date.format(dowFmt), style = MaterialTheme.typography.labelSmall, color = Color.LightGray)
-                    Text("${item.date.dayOfMonth}", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = Color.White)
                     Text(
-                        text = if (item.totalSleepMinutes > 0) String.format("%.1fh", item.totalSleepMinutes / 60f) else "--",
-                        style = MaterialTheme.typography.labelMedium,
-                        fontWeight = FontWeight.SemiBold,
-                        color = if (item.totalSleepMinutes == 0) Color.Gray else if (met) SleepPalette.OptimalGreen else SleepPalette.StarGold
+                        text = item.date.format(dowFmt),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = SleepPalette.OnBackgroundMuted
+                    )
+                    Text(
+                        text = item.date.dayOfMonth.toString(),
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = SleepPalette.OnBackground
+                    )
+                    Text(
+                        text = when {
+                            item.totalSleepMinutes <= 0 -> "--"
+                            item.isDemoData -> String.format("%.1fh*", hours)
+                            else -> String.format("%.1fh", hours)
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = when {
+                            item.isDemoData -> SleepPalette.StageRem
+                            item.totalSleepMinutes <= 0 -> SleepPalette.OnBackgroundDim
+                            metTarget -> SleepPalette.OptimalGreen
+                            else -> SleepPalette.StarGold
+                        }
                     )
                 }
             }
@@ -183,151 +281,205 @@ fun DailyHoursStrip(
 }
 
 @Composable
-fun SessionSummaryCard(session: SleepSessionEntity) {
-    val timeFmt = remember { DateTimeFormatter.ofPattern("HH:mm") }
-    val zone = ZoneId.systemDefault()
-    val startStr = Instant.ofEpochMilli(session.asleepTimeMs).atZone(zone).format(timeFmt)
-    val endStr = Instant.ofEpochMilli(session.wakeUpTimeMs).atZone(zone).format(timeFmt)
-    val totalMin = (session.sleepDurationMs / 60_000L).toInt()
-    val wakeBadge = when (session.wakeMode) {
-        WakeMode.NATURAL_NO_ALARM -> "Không báo thức (Tự nhiên)"
-        WakeMode.SMART_ALARM -> "Báo thức thông minh"
-        WakeMode.HARD_ALARM -> "Có báo thức"
-    }
+private fun SessionSummaryWithQualityCard(
+    session: SleepSessionEntity,
+    metrics: SleepQualityMetrics,
+    onDelete: () -> Unit
+) {
+    val fmt = remember { DateTimeFormatter.ofPattern("HH:mm") }
+    val zone = remember { ZoneId.systemDefault() }
+    val asleepStr = Instant.ofEpochMilli(session.asleepTimeMs).atZone(zone).toLocalTime().format(fmt)
+    val wakeStr = Instant.ofEpochMilli(session.wakeUpTimeMs).atZone(zone).toLocalTime().format(fmt)
+    var confirmDelete by remember { mutableStateOf(false) }
 
     Card(
         colors = CardDefaults.cardColors(containerColor = SleepPalette.SurfaceCard),
-        shape = RoundedCornerShape(20.dp),
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text("Tổng thời gian ngủ", color = Color.LightGray, style = MaterialTheme.typography.labelMedium)
-                Text(wakeBadge, color = SleepPalette.StageRem, style = MaterialTheme.typography.labelSmall)
-            }
-            Text(
-                text = "${totalMin / 60} giờ ${totalMin % 60} phút",
-                style = MaterialTheme.typography.headlineMedium,
-                fontWeight = FontWeight.Bold,
-                color = Color.White
-            )
-            Text(
-                text = "Từ $startStr đến $endStr • Thức vi mô: ${session.microAwakeningsCount} lần",
-                color = Color.Gray,
-                style = MaterialTheme.typography.bodySmall
-            )
-        }
-    }
-}
-
-@Composable
-fun SleepStages4TierCard(epochs: List<SleepEpochEntity>) {
-    var inspectedIndex by remember(epochs) { mutableStateOf<Int?>(null) }
-    val timeFmt = remember { DateTimeFormatter.ofPattern("HH:mm") }
-
-    Card(
-        colors = CardDefaults.cardColors(containerColor = SleepPalette.SurfaceCard),
-        shape = RoundedCornerShape(20.dp),
+        shape = RoundedCornerShape(22.dp),
         modifier = Modifier.fillMaxWidth()
     ) {
         Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text(
-                text = "Các khoảng Awake • REM • Core • Deep",
-                color = Color.White,
-                fontWeight = FontWeight.Bold
-            )
-
-            // Hàng riêng cố định hiển thị 03:42 • Awake • 15 bpm, không bị ép dạt sang mép phải
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(SleepPalette.SurfaceElevated, RoundedCornerShape(10.dp))
-                    .padding(horizontal = 12.dp, vertical = 8.dp)
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                val inspected = inspectedIndex?.let { epochs.getOrNull(it) }
-                if (inspected != null) {
-                    val t = Instant.ofEpochMilli(inspected.timestampMs).atZone(ZoneId.systemDefault()).format(timeFmt)
-                    val br = inspected.breathingRateBpm?.let { " • ${String.format("%.0f", it)} bpm" } ?: ""
+                Column(Modifier.weight(1f)) {
                     Text(
-                        text = "$t • ${inspected.stage.displayLabel()}$br",
-                        color = inspected.stage.stageColor(),
-                        fontWeight = FontWeight.SemiBold,
-                        style = MaterialTheme.typography.bodySmall,
-                        maxLines = 1
+                        text = if (metrics.isDemoData) "Thời gian ngủ [DEMO]" else "Tổng thời gian ngủ (TST)",
+                        color = if (metrics.isDemoData) SleepPalette.StageRem else SleepPalette.OnBackgroundMuted,
+                        style = MaterialTheme.typography.labelMedium
                     )
-                } else {
                     Text(
-                        text = "Chạm hoặc kéo ngang trên biểu đồ để xem từng mốc 30 giây",
-                        color = Color.Gray,
-                        style = MaterialTheme.typography.bodySmall,
-                        maxLines = 1
+                        text = "${metrics.provenance.labelVi}",
+                        color = SleepPalette.StageRem,
+                        style = MaterialTheme.typography.labelSmall
+                    )
+                }
+                IconButton(onClick = { confirmDelete = true }) {
+                    Icon(
+                        imageVector = Icons.Rounded.Delete,
+                        contentDescription = "Xóa phiên",
+                        tint = SleepPalette.ErrorRed
                     )
                 }
             }
 
-            if (epochs.isEmpty()) {
-                Text("Phiên nhập tay không có chi tiết từng 30 giây.", color = Color.Gray, style = MaterialTheme.typography.bodySmall)
-            } else {
-                Row(modifier = Modifier.fillMaxWidth().height(180.dp)) {
-                    Column(
-                        modifier = Modifier.width(48.dp).fillMaxHeight(),
-                        verticalArrangement = Arrangement.SpaceAround
-                    ) {
-                        listOf(SleepStage.AWAKE, SleepStage.REM, SleepStage.LIGHT, SleepStage.DEEP).forEach { st ->
-                            Text(
-                                text = st.displayLabel(),
-                                color = st.stageColor(),
-                                style = MaterialTheme.typography.labelSmall,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                        }
+            Text(
+                text = "${metrics.tstMinutes / 60} giờ ${metrics.tstMinutes % 60} phút",
+                style = MaterialTheme.typography.headlineMedium,
+                fontWeight = FontWeight.Bold,
+                color = SleepPalette.OnBackground
+            )
+
+            Text(
+                text = "Thiếp đi $asleepStr → Thức dậy $wakeStr · Độ phủ ${metrics.coveragePct}%",
+                color = SleepPalette.OnBackgroundMuted,
+                style = MaterialTheme.typography.bodySmall
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                MetricBox(
+                    label = "Hiệu suất (SE)",
+                    value = metrics.sleepEfficiencyPct?.let { "${it}%" } ?: "--",
+                    modifier = Modifier.weight(1f)
+                )
+                MetricBox(
+                    label = "Vào giấc (SOL)",
+                    value = metrics.solMinutes?.let { "${it}p" } ?: "--",
+                    modifier = Modifier.weight(1f)
+                )
+                MetricBox(
+                    label = "Thức đêm (WASO)",
+                    value = metrics.wasoMinutes?.let { "${it}p" } ?: "--",
+                    modifier = Modifier.weight(1f)
+                )
+                MetricBox(
+                    label = "Trên giường",
+                    value = "${metrics.tibMinutes / 60}h${metrics.tibMinutes % 60}p",
+                    modifier = Modifier.weight(1f)
+                )
+            }
+        }
+    }
+
+    if (confirmDelete) {
+        AlertDialog(
+            onDismissRequest = { confirmDelete = false },
+            title = { Text("Xóa phiên ngủ này?") },
+            text = { Text("Hành động này sẽ xóa phiên ngủ khỏi lịch sử và tự động tính lại nợ ngủ của ngày tương ứng.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmDelete = false
+                    onDelete()
+                }) {
+                    Text("Xóa phiên", color = SleepPalette.ErrorRed, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmDelete = false }) { Text("Hủy") }
+            }
+        )
+    }
+}
+
+@Composable
+private fun MetricBox(label: String, value: String, modifier: Modifier = Modifier) {
+    Surface(
+        color = SleepPalette.BackgroundCard,
+        shape = RoundedCornerShape(14.dp),
+        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.08f)),
+        modifier = modifier
+    ) {
+        Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(label, style = MaterialTheme.typography.labelSmall, color = SleepPalette.OnBackgroundMuted, maxLines = 1)
+            Text(value, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, color = SleepPalette.OnBackground)
+        }
+    }
+}
+
+@Composable
+private fun SleepStages4TierCard(epochs: List<SleepEpochEntity>, isDemo: Boolean) {
+    val timeFmt = remember { DateTimeFormatter.ofPattern("HH:mm") }
+    val zone = remember { ZoneId.systemDefault() }
+    var inspectedIndex by remember { mutableStateOf<Int?>(null) }
+
+    Card(
+        colors = CardDefaults.cardColors(containerColor = SleepPalette.SurfaceCard),
+        shape = RoundedCornerShape(22.dp),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text(
+                    text = if (isDemo) "Biểu đồ mẫu [DEMO]" else "Các khoảng Awake · REM · Core · Deep",
+                    color = SleepPalette.OnBackground,
+                    fontWeight = FontWeight.Bold
+                )
+                inspectedIndex?.let { idx ->
+                    val ep = epochs.getOrNull(idx)
+                    if (ep != null) {
+                        val t = Instant.ofEpochMilli(ep.timestampMs).atZone(zone).toLocalTime().format(timeFmt)
+                        Text("$t · ${ep.stage.displayLabel()}", color = ep.stage.stageColor(), style = MaterialTheme.typography.labelMedium)
                     }
-                    Canvas(
-                        modifier = Modifier
-                            .weight(1f)
-                            .fillMaxHeight()
-                            .pointerInput(epochs) {
-                                detectTapGestures { offset ->
-                                    inspectedIndex = ((offset.x / size.width) * epochs.size).toInt().coerceIn(0, epochs.lastIndex)
-                                }
-                            }
-                            .pointerInput(epochs) {
-                                detectHorizontalDragGestures { change, _ ->
-                                    change.consume()
-                                    inspectedIndex = ((change.position.x / size.width) * epochs.size).toInt().coerceIn(0, epochs.lastIndex)
-                                }
-                            }
-                    ) {
-                        val rowHeight = size.height / 4f
-                        val blockHeight = rowHeight * 0.62f
-                        val epochWidth = (size.width / epochs.size).coerceAtLeast(2f)
+                }
+            }
 
-                        for (row in 0..3) {
-                            val yCenter = row * rowHeight + rowHeight / 2f
-                            drawLine(Color.White.copy(alpha = 0.06f), Offset(0f, yCenter), Offset(size.width, yCenter), strokeWidth = 1.dp.toPx())
-                        }
+            Row(Modifier.fillMaxWidth().height(160.dp)) {
+                Column(
+                    Modifier.width(48.dp).fillMaxHeight(),
+                    verticalArrangement = Arrangement.SpaceAround
+                ) {
+                    Text("Awake", color = SleepPalette.StageAwake, style = MaterialTheme.typography.labelSmall)
+                    Text("REM", color = SleepPalette.StageRem, style = MaterialTheme.typography.labelSmall)
+                    Text("Core", color = SleepPalette.StageCore, style = MaterialTheme.typography.labelSmall)
+                    Text("Deep", color = SleepPalette.StageDeep, style = MaterialTheme.typography.labelSmall)
+                }
 
-                        epochs.forEachIndexed { idx, epoch ->
-                            val rowIdx = when (epoch.stage) {
-                                SleepStage.AWAKE -> 0
-                                SleepStage.REM -> 1
-                                SleepStage.LIGHT -> 2
-                                SleepStage.DEEP -> 3
+                Canvas(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight()
+                        .pointerInput(epochs) {
+                            detectTapGestures { pos ->
+                                inspectedIndex = ((pos.x / size.width) * epochs.size).toInt().coerceIn(0, epochs.lastIndex)
                             }
-                            val topY = rowIdx * rowHeight + (rowHeight - blockHeight) / 2f
-                            val leftX = idx * (size.width / epochs.size)
-                            drawRoundRect(
-                                color = epoch.stage.stageColor(),
-                                topLeft = Offset(leftX, topY),
-                                size = Size(epochWidth + 0.8f, blockHeight),
-                                cornerRadius = CornerRadius(4f, 4f)
-                            )
                         }
-
-                        inspectedIndex?.let { idx ->
-                            val cursorX = idx * (size.width / epochs.size)
-                            drawLine(Color.White.copy(alpha = 0.7f), Offset(cursorX, 0f), Offset(cursorX, size.height), strokeWidth = 1.5.dp.toPx())
+                        .pointerInput(epochs) {
+                            detectHorizontalDragGestures { change, _ ->
+                                change.consume()
+                                inspectedIndex = ((change.position.x / size.width) * epochs.size).toInt().coerceIn(0, epochs.lastIndex)
+                            }
                         }
+                ) {
+                    val rowHeight = size.height / 4f
+                    val blockHeight = rowHeight * 0.62f
+                    val epochWidth = (size.width / epochs.size).coerceAtLeast(2f)
+                    for (row in 0..3) {
+                        val yCenter = row * rowHeight + rowHeight / 2f
+                        drawLine(Color.White.copy(alpha = 0.06f), Offset(0f, yCenter), Offset(size.width, yCenter), strokeWidth = 1.dp.toPx())
+                    }
+                    epochs.forEachIndexed { idx, epoch ->
+                        val rowIdx = when (epoch.stage) {
+                            SleepStage.AWAKE -> 0
+                            SleepStage.REM -> 1
+                            SleepStage.LIGHT -> 2
+                            SleepStage.DEEP -> 3
+                        }
+                        val topY = rowIdx * rowHeight + (rowHeight - blockHeight) / 2f
+                        val leftX = idx * (size.width / epochs.size)
+                        drawRoundRect(
+                            color = epoch.stage.stageColor(),
+                            topLeft = Offset(leftX, topY),
+                            size = Size(epochWidth + 0.8f, blockHeight),
+                            cornerRadius = CornerRadius(4f, 4f)
+                        )
+                    }
+                    inspectedIndex?.let { idx ->
+                        val cursorX = idx * (size.width / epochs.size)
+                        drawLine(Color.White.copy(alpha = 0.7f), Offset(cursorX, 0f), Offset(cursorX, size.height), strokeWidth = 1.5.dp.toPx())
                     }
                 }
             }
@@ -336,7 +488,7 @@ fun SleepStages4TierCard(epochs: List<SleepEpochEntity>) {
 }
 
 @Composable
-fun StageBreakdownCard(session: SleepSessionEntity) {
+private fun StageBreakdownCard(session: SleepSessionEntity) {
     val totalInBedMs = (session.awakeDurationMs + session.sleepDurationMs).coerceAtLeast(1L)
     val rows = listOf(
         SleepStage.AWAKE to session.awakeDurationMs,
@@ -346,11 +498,11 @@ fun StageBreakdownCard(session: SleepSessionEntity) {
     )
     Card(
         colors = CardDefaults.cardColors(containerColor = SleepPalette.SurfaceCard),
-        shape = RoundedCornerShape(20.dp),
+        shape = RoundedCornerShape(22.dp),
         modifier = Modifier.fillMaxWidth()
     ) {
         Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text("Phân bổ chi tiết", color = Color.White, fontWeight = FontWeight.Bold)
+            Text("Phân bổ chi tiết", color = SleepPalette.OnBackground, fontWeight = FontWeight.Bold)
             Row(modifier = Modifier.fillMaxWidth().height(12.dp).clip(RoundedCornerShape(6.dp))) {
                 rows.forEach { (stage, ms) ->
                     val f = (ms.toFloat() / totalInBedMs.toFloat()).coerceAtLeast(0f)
@@ -367,9 +519,9 @@ fun StageBreakdownCard(session: SleepSessionEntity) {
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Box(Modifier.size(10.dp).clip(CircleShape).background(stage.stageColor()))
-                        Text(stage.displayLabel(), color = Color.White, fontWeight = FontWeight.Medium)
+                        Text(stage.displayLabel(), color = SleepPalette.OnBackground, fontWeight = FontWeight.Medium)
                     }
-                    Text("${mins / 60}h ${mins % 60}p ($pct%)", color = Color.LightGray, fontWeight = FontWeight.SemiBold)
+                    Text("${mins / 60}h ${mins % 60}p ($pct%)", color = SleepPalette.OnBackgroundMuted, fontWeight = FontWeight.SemiBold)
                 }
             }
         }
@@ -377,32 +529,40 @@ fun StageBreakdownCard(session: SleepSessionEntity) {
 }
 
 @Composable
-fun SoundEventsCard(events: List<SoundEventEntity>) {
+private fun SoundEventsCard(events: List<SoundEventEntity>) {
     Card(
         colors = CardDefaults.cardColors(containerColor = SleepPalette.SurfaceCard),
-        shape = RoundedCornerShape(20.dp),
+        shape = RoundedCornerShape(22.dp),
         modifier = Modifier.fillMaxWidth()
     ) {
         Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("Âm thanh ban đêm (YAMNet AI)", color = Color.White, fontWeight = FontWeight.Bold)
+            Text("Âm thanh ban đêm (YAMNet AI)", color = SleepPalette.OnBackground, fontWeight = FontWeight.Bold)
             events.groupBy { it.category }.forEach { (cat, list) ->
-                Text("• ${cat.name}: ${list.size} lần ghi nhận", color = Color.LightGray, style = MaterialTheme.typography.bodySmall)
+                Text("• ${cat.name}: ${list.size} lần ghi nhận", color = SleepPalette.OnBackgroundMuted, style = MaterialTheme.typography.bodySmall)
             }
         }
     }
 }
 
 @Composable
-fun DebtTrend14DayCard(snapshots: List<DailySleepDebtSnapshotEntity>) {
+private fun DebtTrendAndSimulatorCard(snapshots: List<DailySleepDebtSnapshotEntity>) {
+    val latestDebt = snapshots.lastOrNull()?.cumulativeDebtMinutes ?: 0
+    var extraSleepTonightMin by remember { mutableStateOf(30f) }
+    val simulatedRecovery = (extraSleepTonightMin * 0.85f).roundToInt().coerceAtMost(90)
+    val projectedDebt = max(0, latestDebt - simulatedRecovery)
+
     Card(
         colors = CardDefaults.cardColors(containerColor = SleepPalette.SurfaceCard),
-        shape = RoundedCornerShape(20.dp),
+        shape = RoundedCornerShape(22.dp),
         modifier = Modifier.fillMaxWidth()
     ) {
-        Column(Modifier.padding(18.dp)) {
-            Text("Xu hướng Nợ ngủ 14 ngày", color = Color.White, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(12.dp))
-            Canvas(modifier = Modifier.fillMaxWidth().height(110.dp)) {
+        Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text("Nợ ngủ 14 ngày", color = SleepPalette.OnBackground, fontWeight = FontWeight.Bold)
+                Text("${latestDebt / 60}h ${latestDebt % 60}p", color = SleepPalette.StarGold, fontWeight = FontWeight.Bold)
+            }
+
+            Canvas(modifier = Modifier.fillMaxWidth().height(96.dp)) {
                 val maxDebt = maxOf(480f, snapshots.maxOfOrNull { it.cumulativeDebtMinutes.toFloat() } ?: 480f)
                 val stepX = size.width / maxOf(1, snapshots.size)
                 val barW = stepX * 0.6f
@@ -419,26 +579,312 @@ fun DebtTrend14DayCard(snapshots: List<DailySleepDebtSnapshotEntity>) {
                     drawRoundRect(color, Offset(x, size.height - barH), Size(barW, barH), CornerRadius(6f, 6f))
                 }
             }
+
+            HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+            Text(
+                text = "Mô phỏng hồi phục: Ngủ thêm +${extraSleepTonightMin.toInt()}p → Nợ còn ${projectedDebt / 60}h ${projectedDebt % 60}p",
+                color = SleepPalette.OptimalGreen,
+                style = MaterialTheme.typography.labelMedium
+            )
+            Slider(
+                value = extraSleepTonightMin,
+                onValueChange = { extraSleepTonightMin = it },
+                valueRange = 0f..90f,
+                steps = 5
+            )
         }
     }
 }
 
 @Composable
-fun ManualSleepEntryDialog(
-    onSave: (Int, WakeMode, Boolean) -> Unit,
+private fun ReportAndRegularityTab(
+    uiState: HistoryUiState,
+    onSelectReportRange: (ReportRangeOption) -> Unit,
+    onDismissWarning: (String) -> Unit,
+    onLaunchCsvExport: () -> Unit,
+    onLaunchPdfExport: () -> Unit
+) {
+    val report = uiState.healthReport ?: return
+
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        FilterChip(
+            selected = uiState.reportRange == ReportRangeOption.LAST_7_DAYS,
+            onClick = { onSelectReportRange(ReportRangeOption.LAST_7_DAYS) },
+            label = { Text("7 ngày") }
+        )
+        FilterChip(
+            selected = uiState.reportRange == ReportRangeOption.LAST_30_DAYS,
+            onClick = { onSelectReportRange(ReportRangeOption.LAST_30_DAYS) },
+            label = { Text("30 ngày") }
+        )
+    }
+
+    // Warnings (non-diagnostic)
+    uiState.warnings.forEach { warning ->
+        WarningCard(warning = warning, onDismiss = { onDismissWarning(warning.type.name) })
+    }
+
+    // Report Overview
+    ReportOverviewCard(report = report)
+
+    // Regularity Card
+    RegularitySummaryCard(report = report)
+
+    // Export Buttons (SAF Offline)
+    Card(
+        colors = CardDefaults.cardColors(containerColor = SleepPalette.SurfaceCard),
+        shape = RoundedCornerShape(22.dp),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("Xuất báo cáo ngoại tuyến", color = SleepPalette.OnBackground, fontWeight = FontWeight.Bold)
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedButton(onClick = onLaunchCsvExport, modifier = Modifier.weight(1f)) {
+                    Icon(Icons.Rounded.Download, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Xuất CSV")
+                }
+                OutlinedButton(onClick = onLaunchPdfExport, modifier = Modifier.weight(1f)) {
+                    Icon(Icons.Rounded.Download, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Xuất PDF")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun WarningCard(warning: SleepHealthWarning, onDismiss: () -> Unit) {
+    val accent = if (warning.severity == WarningSeverity.ATTENTION) Color(0xFFFB923C) else SleepPalette.StarGold
+    Card(
+        colors = CardDefaults.cardColors(containerColor = SleepPalette.SurfaceCard),
+        shape = RoundedCornerShape(20.dp),
+        border = BorderStroke(1.dp, accent.copy(alpha = 0.35f)),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Icon(Icons.Rounded.WarningAmber, contentDescription = null, tint = accent, modifier = Modifier.size(18.dp))
+                    Text(warning.title, color = SleepPalette.OnBackground, fontWeight = FontWeight.Bold)
+                }
+                TextButton(onClick = onDismiss) {
+                    Text("Ẩn 3 ngày", color = SleepPalette.OnBackgroundMuted, style = MaterialTheme.typography.labelSmall)
+                }
+            }
+            Text(warning.message, color = SleepPalette.OnBackground, style = MaterialTheme.typography.bodySmall)
+            Text(
+                text = "${warning.evidenceSummary} · Độ tin cậy ${warning.confidencePct}%",
+                color = SleepPalette.OnBackgroundMuted,
+                style = MaterialTheme.typography.labelSmall
+            )
+        }
+    }
+}
+
+@Composable
+private fun ReportOverviewCard(report: SleepHealthReport) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = SleepPalette.SurfaceCard),
+        shape = RoundedCornerShape(22.dp),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("Báo cáo: ${report.rangeLabel}", color = SleepPalette.OnBackground, fontWeight = FontWeight.Bold)
+            Text(
+                text = "Độ phủ dữ liệu thật: ${report.validNightsCount}/${report.totalDays} đêm (${report.coveragePct}%)",
+                color = SleepPalette.OnBackgroundMuted,
+                style = MaterialTheme.typography.bodySmall
+            )
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                MetricBox(
+                    label = "TB / đêm",
+                    value = "${report.avgSleepMinutes / 60}h ${report.avgSleepMinutes % 60}p",
+                    modifier = Modifier.weight(1f)
+                )
+                MetricBox(
+                    label = "Trung vị",
+                    value = "${report.medianSleepMinutes / 60}h ${report.medianSleepMinutes % 60}p",
+                    modifier = Modifier.weight(1f)
+                )
+                MetricBox(
+                    label = "Hiệu suất TB",
+                    value = report.avgEfficiencyPct?.let { "${it}%" } ?: "--",
+                    modifier = Modifier.weight(1f)
+                )
+            }
+            report.observations.forEach { obs ->
+                Text("• $obs", color = SleepPalette.OnBackground, style = MaterialTheme.typography.bodySmall)
+            }
+            if (report.excludedDemoCount > 0) {
+                Text(
+                    text = "• Đã tự động tách ${report.excludedDemoCount} bản ghi [DEMO] khỏi báo cáo.",
+                    color = SleepPalette.StageRem,
+                    style = MaterialTheme.typography.labelSmall
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun RegularitySummaryCard(report: SleepHealthReport) {
+    val reg = report.regularity
+    Card(
+        colors = CardDefaults.cardColors(containerColor = SleepPalette.SurfaceCard),
+        shape = RoundedCornerShape(22.dp),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("Độ đều đặn nhịp ngủ", color = SleepPalette.OnBackground, fontWeight = FontWeight.Bold)
+            if (!reg.hasSufficientData) {
+                Text(
+                    text = "Cần tối thiểu ${reg.requiredNights} đêm dữ liệu thật để kết luận xu hướng.",
+                    color = SleepPalette.StarGold,
+                    style = MaterialTheme.typography.labelSmall
+                )
+            }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                MetricBox(
+                    label = "Giờ ngủ",
+                    value = "${reg.typicalBedtimeLabel} (±${reg.bedtimeVariabilityMin}p)",
+                    modifier = Modifier.weight(1f)
+                )
+                MetricBox(
+                    label = "Giờ dậy",
+                    value = "${reg.typicalWakeLabel} (±${reg.wakeVariabilityMin}p)",
+                    modifier = Modifier.weight(1f)
+                )
+                MetricBox(
+                    label = "Điểm giữa",
+                    value = reg.sleepMidpointLabel,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+            reg.weekendShiftMin?.let { shift ->
+                Text(
+                    text = "Chênh lệch cuối tuần so với ngày thường: ${shift} phút",
+                    color = SleepPalette.OnBackgroundMuted,
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ManualSleepEntryDialog(
+    onSave: (bedHour: Int, bedMinute: Int, wakeHour: Int, wakeMinute: Int, WakeMode, Boolean) -> Unit,
     onDismiss: () -> Unit
 ) {
-    var hours by remember { mutableStateOf(7.5f) }
+    var bedHour by remember { mutableStateOf(23) }
+    var bedMinute by remember { mutableStateOf(0) }
+    var wakeHour by remember { mutableStateOf(6) }
+    var wakeMinute by remember { mutableStateOf(30) }
+    var pickBedTime by remember { mutableStateOf(false) }
+    var pickWakeTime by remember { mutableStateOf(false) }
     var isNatural by remember { mutableStateOf(true) }
-    var withDemoStages by remember { mutableStateOf(true) }
+    var withDemoStages by remember { mutableStateOf(false) }
+
+    fun adjustBed(deltaMin: Int) {
+        val next = (((bedHour * 60 + bedMinute + deltaMin) % 1440) + 1440) % 1440
+        bedHour = next / 60
+        bedMinute = next % 60
+    }
+
+    fun adjustWake(deltaMin: Int) {
+        val next = (((wakeHour * 60 + wakeMinute + deltaMin) % 1440) + 1440) % 1440
+        wakeHour = next / 60
+        wakeMinute = next % 60
+    }
+
+    val bedTotal = bedHour * 60 + bedMinute
+    val wakeTotal = wakeHour * 60 + wakeMinute
+    val sleepMin = (((wakeTotal - bedTotal) % 1440) + 1440) % 1440
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Ghi nhận giấc ngủ") },
+        title = { Text("Ghi nhận giấc ngủ (từng phút)") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text("Thời lượng ngủ: ${String.format("%.1f", hours)} tiếng")
-                Slider(value = hours, onValueChange = { hours = it }, valueRange = 2f..12f, steps = 19)
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Surface(
+                    onClick = { pickBedTime = true },
+                    color = SleepPalette.BackgroundCard,
+                    shape = RoundedCornerShape(14.dp),
+                    border = BorderStroke(1.dp, Color.White.copy(alpha = 0.08f)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                            Text("Giờ bắt đầu ngủ", color = SleepPalette.OnBackgroundMuted, style = MaterialTheme.typography.labelMedium)
+                            Text(
+                                text = String.format("%02d:%02d", bedHour, bedMinute),
+                                color = SleepPalette.StageRem,
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            listOf(-15 to "-15p", -1 to "-1p", 1 to "+1p", 15 to "+15p").forEach { (delta, lbl) ->
+                                OutlinedButton(
+                                    onClick = { adjustBed(delta) },
+                                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Text(lbl, style = MaterialTheme.typography.labelSmall)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Surface(
+                    onClick = { pickWakeTime = true },
+                    color = SleepPalette.BackgroundCard,
+                    shape = RoundedCornerShape(14.dp),
+                    border = BorderStroke(1.dp, Color.White.copy(alpha = 0.08f)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                            Text("Giờ thức dậy", color = SleepPalette.OnBackgroundMuted, style = MaterialTheme.typography.labelMedium)
+                            Text(
+                                text = String.format("%02d:%02d", wakeHour, wakeMinute),
+                                color = SleepPalette.StarGold,
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            listOf(-15 to "-15p", -1 to "-1p", 1 to "+1p", 15 to "+15p").forEach { (delta, lbl) ->
+                                OutlinedButton(
+                                    onClick = { adjustWake(delta) },
+                                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Text(lbl, style = MaterialTheme.typography.labelSmall)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Text(
+                    text = if (sleepMin > 0) {
+                        "Thời lượng: ${sleepMin / 60} giờ ${sleepMin % 60} phút"
+                    } else {
+                        "Giờ thức dậy phải khác giờ đi ngủ"
+                    },
+                    color = if (sleepMin > 0) SleepPalette.OptimalGreen else SleepPalette.ErrorRed,
+                    fontWeight = FontWeight.SemiBold,
+                    style = MaterialTheme.typography.bodyMedium
+                )
+
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -452,17 +898,63 @@ fun ManualSleepEntryDialog(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text("Tạo chu kỳ mẫu Awake/REM/Core/Deep", modifier = Modifier.weight(1f))
+                    Column(Modifier.weight(1f)) {
+                        Text("Tạo chu kỳ mẫu [DEMO]")
+                        Text("Sẽ tách khỏi báo cáo thật", style = MaterialTheme.typography.labelSmall, color = SleepPalette.StageRem)
+                    }
                     Switch(checked = withDemoStages, onCheckedChange = { withDemoStages = it })
                 }
             }
         },
         confirmButton = {
-            Button(onClick = {
-                val mode = if (isNatural) WakeMode.NATURAL_NO_ALARM else WakeMode.HARD_ALARM
-                onSave((hours * 60).toInt(), mode, withDemoStages)
-            }) { Text("Lưu") }
+            Button(
+                enabled = sleepMin > 0,
+                onClick = {
+                    val mode = if (isNatural) WakeMode.NATURAL_NO_ALARM else WakeMode.HARD_ALARM
+                    onSave(bedHour, bedMinute, wakeHour, wakeMinute, mode, withDemoStages)
+                }
+            ) { Text("Lưu") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Hủy") } }
     )
+
+    if (pickBedTime) {
+        val state = rememberTimePickerState(
+            initialHour = bedHour,
+            initialMinute = bedMinute,
+            is24Hour = true
+        )
+        AlertDialog(
+            onDismissRequest = { pickBedTime = false },
+            confirmButton = {
+                TextButton(onClick = {
+                    bedHour = state.hour
+                    bedMinute = state.minute
+                    pickBedTime = false
+                }) { Text("Xác nhận") }
+            },
+            dismissButton = { TextButton(onClick = { pickBedTime = false }) { Text("Hủy") } },
+            text = { TimePicker(state = state) }
+        )
+    }
+
+    if (pickWakeTime) {
+        val state = rememberTimePickerState(
+            initialHour = wakeHour,
+            initialMinute = wakeMinute,
+            is24Hour = true
+        )
+        AlertDialog(
+            onDismissRequest = { pickWakeTime = false },
+            confirmButton = {
+                TextButton(onClick = {
+                    wakeHour = state.hour
+                    wakeMinute = state.minute
+                    pickWakeTime = false
+                }) { Text("Xác nhận") }
+            },
+            dismissButton = { TextButton(onClick = { pickWakeTime = false }) { Text("Hủy") } },
+            text = { TimePicker(state = state) }
+        )
+    }
 }

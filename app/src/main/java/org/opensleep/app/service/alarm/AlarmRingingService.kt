@@ -18,6 +18,7 @@ import android.os.Vibrator
 import android.os.VibratorManager
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
+import androidx.core.content.ContextCompat
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.*
 import org.opensleep.app.data.local.db.dao.AlarmDao
@@ -59,17 +60,19 @@ class AlarmRingingService : Service() {
                 scope.launch { startPlaybackAndVibration(currentAlarmId) }
             }
             ACTION_SNOOZE -> {
-                if (currentAlarmId != -1L) {
-                    alarmScheduler.scheduleSnooze(currentAlarmId, snoozeMinutes = 9)
+                val alarmId = intent.getLongExtra(AlarmScheduler.EXTRA_ALARM_ID, currentAlarmId)
+                if (alarmId != -1L) {
+                    alarmScheduler.scheduleSnooze(alarmId, snoozeMinutes = 9)
                 }
                 stopSelfGracefully()
             }
             ACTION_DISMISS -> {
-                // Nếu đang theo dõi giấc ngủ ban đêm -> tự động dừng tracking & tính Nợ ngủ
-                val stopTracking = Intent(this, NightTimeService::class.java).apply {
-                    action = NightTimeService.ACTION_STOP_TRACKING
+                if (trackingStateHolder.state.value.isTracking) {
+                    val stopTracking = Intent(this, NightTimeService::class.java).apply {
+                        action = NightTimeService.ACTION_STOP_TRACKING
+                    }
+                    ContextCompat.startForegroundService(this, stopTracking)
                 }
-                startService(stopTracking)
                 stopSelfGracefully()
             }
         }
@@ -87,8 +90,8 @@ class AlarmRingingService : Service() {
             this, 0, fullScreenIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val snoozePi = buildActionPi(ACTION_SNOOZE, 1)
-        val dismissPi = buildActionPi(ACTION_DISMISS, 2)
+        val snoozePi = buildActionPi(ACTION_SNOOZE, 1, currentAlarmId)
+        val dismissPi = buildActionPi(ACTION_DISMISS, 2, currentAlarmId)
 
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
@@ -136,7 +139,6 @@ class AlarmRingingService : Service() {
             }
         }
 
-        // Gentle Fade-in theo đường cong t^2
         fadeJob?.cancel()
         fadeJob = scope.launch {
             val steps = fadeSeconds * 2
@@ -152,7 +154,6 @@ class AlarmRingingService : Service() {
             startVibration()
         }
 
-        // Contactless Gesture Snooze: Lắng nghe cử chỉ vẫy tay trên không
         gestureJob?.cancel()
         if (config?.snoozeGestureEnabled != false) {
             gestureJob = scope.launch {
@@ -160,6 +161,7 @@ class AlarmRingingService : Service() {
                     sonarSource.gestureSnoozeEvents.collect {
                         val snoozeIntent = Intent(this@AlarmRingingService, AlarmRingingService::class.java).apply {
                             action = ACTION_SNOOZE
+                            putExtra(AlarmScheduler.EXTRA_ALARM_ID, alarmId)
                         }
                         startService(snoozeIntent)
                     }
@@ -201,16 +203,24 @@ class AlarmRingingService : Service() {
         super.onDestroy()
     }
 
-    private fun buildActionPi(action: String, reqCode: Int): PendingIntent {
-        val intent = Intent(this, AlarmRingingService::class.java).apply { this.action = action }
-        return PendingIntent.getService(this, reqCode, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+    private fun buildActionPi(action: String, reqCode: Int, alarmId: Long): PendingIntent {
+        val intent = Intent(this, AlarmRingingService::class.java).apply {
+            this.action = action
+            putExtra(AlarmScheduler.EXTRA_ALARM_ID, alarmId)
+        }
+        return PendingIntent.getService(
+            this,
+            reqCode,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
     }
 
     private fun createNotificationChannel() {
         val manager = getSystemService(NotificationManager::class.java)
         if (manager.getNotificationChannel(CHANNEL_ID) == null) {
             val channel = NotificationChannel(CHANNEL_ID, "Báo thức OpenSleep", NotificationManager.IMPORTANCE_HIGH).apply {
-                setSound(null, null) // Âm thanh do MediaPlayer kiểm soát để làm fade-in
+                setSound(null, null)
                 enableVibration(false)
             }
             manager.createNotificationChannel(channel)

@@ -29,6 +29,7 @@ class NightSoundClassifier @Inject constructor(
         private const val MIN_CONFIDENCE = 0.25f
     }
 
+    @Synchronized
     fun initialize() {
         if (interpreter != null) return
         runCatching {
@@ -39,9 +40,7 @@ class NightSoundClassifier @Inject constructor(
         }
     }
 
-    /**
-     * Chỉ gọi hàm này khi Ring Buffer 16kHz phát hiện RMS vượt Noise Floor + 10 dB!
-     */
+    @Synchronized
     fun classifyWindow(pcmFloat15600: FloatArray): SoundClassificationResult? {
         val interp = interpreter ?: return null
         if (pcmFloat15600.size < REQUIRED_SAMPLES_16KHZ) return null
@@ -52,7 +51,6 @@ class NightSoundClassifier @Inject constructor(
             pcmFloat15600.copyOf(REQUIRED_SAMPLES_16KHZ)
         }
 
-        // YAMNet trả về tensor [1, 521] (hoặc [N, 521] tùy biến thể export)
         val outputScores = Array(1) { FloatArray(NUM_CLASSES) }
         interp.run(input, outputScores)
 
@@ -75,6 +73,7 @@ class NightSoundClassifier @Inject constructor(
         )
     }
 
+    @Synchronized
     fun close() {
         interpreter?.close()
         interpreter = null
@@ -104,9 +103,13 @@ class NightSoundClassifier @Inject constructor(
 
     private fun loadClassMap(assetName: String): List<String> {
         return runCatching {
-            context.assets.open(assetName).bufferedReader().readLines()
-                .drop(1) // Bỏ header CSV: index,mid,display_name
-                .mapNotNull { line -> line.split(",").getOrNull(2)?.trim() }
+            context.assets.open(assetName).bufferedReader().useLines { lines ->
+                lines.drop(1)
+                    .mapNotNull { line ->
+                        line.split(",", limit = 3).getOrNull(2)?.trim()?.removeSurrounding("\"")
+                    }
+                    .toList()
+            }
         }.getOrDefault(emptyList())
     }
 }

@@ -4,6 +4,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import org.opensleep.app.data.local.db.SleepStage
+import org.opensleep.app.data.local.db.SoundCategory
 import org.opensleep.app.data.local.db.TrackingMode
 import org.opensleep.app.data.local.db.WakeMode
 import javax.inject.Inject
@@ -11,10 +12,18 @@ import javax.inject.Singleton
 
 data class EpochReading(
     val timestampMs: Long,
-    val motionIntensity: Float,    // [0.0 .. 1.0+]
-    val soundEnergyDb: Float,      // Năng lượng âm thanh môi trường
-    val breathingRateBpm: Float?,  // Chỉ có giá trị khi dùng Sonar
+    val motionIntensity: Float,
+    val soundEnergyDb: Float,
+    val breathingRateBpm: Float?,
     val confidence: Float = 1.0f
+)
+
+data class DetectedSoundEvent(
+    val timestampMs: Long,
+    val durationSeconds: Int,
+    val category: SoundCategory,
+    val confidence: Float,
+    val decibelPeak: Float
 )
 
 interface SleepSensorSource {
@@ -22,6 +31,7 @@ interface SleepSensorSource {
     suspend fun start()
     suspend fun stop()
     fun collectLatestEpochReading(windowStartMs: Long, windowEndMs: Long): EpochReading
+    fun drainDetectedSoundEvents(): List<DetectedSoundEvent> = emptyList()
 }
 
 data class TrackingUiState(

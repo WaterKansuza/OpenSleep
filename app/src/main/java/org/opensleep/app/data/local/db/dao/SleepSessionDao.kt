@@ -2,6 +2,7 @@ package org.opensleep.app.data.local.db.dao
 
 import androidx.room.*
 import kotlinx.coroutines.flow.Flow
+import org.opensleep.app.data.local.db.SessionType
 import org.opensleep.app.data.local.db.entity.*
 
 @Dao
@@ -17,6 +18,9 @@ interface SleepSessionDao {
 
     @Query("SELECT * FROM sleep_session WHERE id = :sessionId")
     suspend fun getSessionById(sessionId: Long): SleepSessionEntity?
+
+    @Query("SELECT COUNT(*) FROM sleep_session WHERE startTimeMs = :startTimeMs AND sessionType = :sessionType")
+    suspend fun countSessionsByStartAndType(startTimeMs: Long, sessionType: SessionType): Int
 
     @Query("SELECT * FROM sleep_session ORDER BY startTimeMs DESC")
     fun observeAllSessions(): Flow<List<SleepSessionEntity>>
@@ -35,21 +39,26 @@ interface SleepSessionDao {
     """)
     fun observeSessionsInRange(startEpochDay: Long, endEpochDay: Long): Flow<List<SleepSessionEntity>>
 
-    // Epochs cho Hypnogram
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertEpochs(epochs: List<SleepEpochEntity>)
 
     @Query("SELECT * FROM sleep_epoch WHERE sessionId = :sessionId ORDER BY timestampMs ASC")
     suspend fun getEpochsForSession(sessionId: Long): List<SleepEpochEntity>
 
-    // Sound Events
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertSoundEvents(events: List<SoundEventEntity>)
 
     @Query("SELECT * FROM sound_event WHERE sessionId = :sessionId ORDER BY offsetSeconds ASC")
     suspend fun getSoundEventsForSession(sessionId: Long): List<SoundEventEntity>
 
-    // Notes
+    @Query("""
+        DELETE FROM sound_event
+        WHERE sessionId IN (
+            SELECT id FROM sleep_session WHERE referenceDateEpochDay < :minEpochDay
+        )
+    """)
+    suspend fun deleteSoundEventsBeforeDay(minEpochDay: Long): Int
+
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertNotes(notes: List<SleepNoteEntity>)
 
@@ -59,13 +68,26 @@ interface SleepSessionDao {
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun attachNoteToSession(crossRef: SessionNoteCrossRef)
 
-    // Mood & Dream
+    @Query("""
+        SELECT n.* FROM sleep_note n
+        INNER JOIN session_note_cross_ref r ON n.id = r.noteId
+        WHERE r.sessionId = :sessionId
+        ORDER BY n.displayOrder ASC
+    """)
+    suspend fun getNotesForSession(sessionId: Long): List<SleepNoteEntity>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertMood(mood: MoodEntryEntity): Long
 
     @Query("SELECT * FROM mood_entry WHERE dateEpochDay BETWEEN :startEpochDay AND :endEpochDay")
     suspend fun getMoodsInRange(startEpochDay: Long, endEpochDay: Long): List<MoodEntryEntity>
 
+    @Query("SELECT * FROM mood_entry WHERE sessionId = :sessionId ORDER BY createdAtMs DESC LIMIT 1")
+    suspend fun getMoodForSession(sessionId: Long): MoodEntryEntity?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertDream(dream: DreamJournalEntity): Long
+
+    @Query("SELECT * FROM dream_journal WHERE sessionId = :sessionId ORDER BY createdAtMs DESC LIMIT 1")
+    suspend fun getDreamForSession(sessionId: Long): DreamJournalEntity?
 }

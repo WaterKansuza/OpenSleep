@@ -20,25 +20,32 @@ import kotlin.math.roundToInt
 class SleepDebtRepository @Inject constructor(
     private val sleepSessionDao: SleepSessionDao,
     private val sleepDebtDao: SleepDebtDao,
-    private val engine: SleepDebtEngine
+    private val engine: SleepDebtEngine,
+    private val userPreferencesRepository: UserPreferencesRepository
 ) {
-
     fun observeProfile(): Flow<UserSleepProfileEntity?> = sleepDebtDao.observeProfile()
 
-    fun observeLatestSnapshot(): Flow<DailySleepDebtSnapshotEntity?> = sleepDebtDao.observeLatestDebtSnapshot()
+    fun observeLatestSnapshot(): Flow<DailySleepDebtSnapshotEntity?> =
+        sleepDebtDao.observeLatestDebtSnapshot()
 
-    fun observeLast14DaysSnapshots(todayEpochDay: Long = LocalDate.now().toEpochDay()): Flow<List<DailySleepDebtSnapshotEntity>> {
+    fun observeLast14DaysSnapshots(
+        todayEpochDay: Long = LocalDate.now().toEpochDay()
+    ): Flow<List<DailySleepDebtSnapshotEntity>> {
         return sleepDebtDao.observeSnapshotsInRange(todayEpochDay - 13, todayEpochDay)
     }
 
-    fun observeCurrentAnalysis(todayEpochDay: Long = LocalDate.now().toEpochDay()): Flow<SleepDebtAnalysis> {
+    fun observeCurrentAnalysis(
+        todayEpochDay: Long = LocalDate.now().toEpochDay()
+    ): Flow<SleepDebtAnalysis> {
         val lookbackStart = todayEpochDay - (SleepDebtEngine.WINDOW_DAYS - 1)
         return combine(
             sleepDebtDao.observeProfile(),
-            sleepSessionDao.observeSessionsInRange(lookbackStart, todayEpochDay)
-        ) { profileOrNull, sessions ->
+            sleepSessionDao.observeSessionsInRange(lookbackStart, todayEpochDay),
+            userPreferencesRepository.preferencesFlow
+        ) { profileOrNull, sessions, prefs ->
             val profile = profileOrNull ?: UserSleepProfileEntity()
-            val grouped = sessions.groupBy { it.referenceDateEpochDay }
+            val realSessions = sessions.filter { it.id !in prefs.demoSessionIds }
+            val grouped = realSessions.groupBy { it.referenceDateEpochDay }
             val aggregates = grouped.mapValues { (day, list) ->
                 engine.aggregateSessionsForDay(day, list)
             }
@@ -46,30 +53,27 @@ class SleepDebtRepository @Inject constructor(
         }
     }
 
-    /**
-     * Gọi mỗi khi hoàn thành 1 phiên ngủ hoặc user sửa/đánh giá giấc ngủ.
-     * Cập nhật: (1) Giờ thức trung bình Process C, (2) Auto-calibrate, (3) Snapshot 14 ngày.
-     */
     suspend fun recalculateAfterSessionChange(referenceEpochDay: Long) {
+        val prefs = userPreferencesRepository.getSnapshot()
         val currentProfile = sleepDebtDao.getProfile() ?: UserSleepProfileEntity()
         val calibrationStart = referenceEpochDay - 21
         val sessions21Days = sleepSessionDao.getSessionsInRange(calibrationStart, referenceEpochDay)
+            .filter { it.id !in prefs.demoSessionIds }
         val moods21Days = sleepSessionDao.getMoodsInRange(calibrationStart, referenceEpochDay)
 
-        // 1. Cập nhật giờ thức dậy trung bình từ các giấc ngủ NIGHT gần đây
-        val nightSessions = sessions21Days.filter { it.sessionType == SessionType.NIGHT && !it.isIncomplete }
+        val nightSessions = sessions21Days.filter {
+            it.sessionType == SessionType.NIGHT && !it.isIncomplete
+        }
         val updatedWakeMin = if (nightSessions.isNotEmpty()) {
-            val avgWake = nightSessions.takeLast(7).map { s ->
+            nightSessions.takeLast(7).map { s ->
                 val offset = ZoneOffset.ofTotalSeconds(s.zoneOffsetSeconds)
                 val localWake = Instant.ofEpochMilli(s.wakeUpTimeMs).atOffset(offset).toLocalTime()
                 localWake.hour * 60 + localWake.minute
             }.average().roundToInt()
-            avgWake
         } else {
             currentProfile.typicalWakeMinutesOfDay
         }
 
-        // 2. Tự hiệu chuẩn nhu cầu ngủ nếu được bật
         val updatedCalibratedNeed = if (currentProfile.autoCalibrateEnabled) {
             engine.autoCalibrateSleepNeed(
                 currentNeedMinutes = currentProfile.calibratedSleepNeedMinutes,
@@ -86,11 +90,11 @@ class SleepDebtRepository @Inject constructor(
         )
         sleepDebtDao.upsertProfile(newProfile)
 
-        // 3. Tính và lưu lại Snapshot cho 14 ngày tính đến hôm nay
         val today = maxOf(LocalDate.now().toEpochDay(), referenceEpochDay)
         val fetchStart = today - 28
-        val allSessions = sleepSessionDao.getSessionsInRange(fetchStart, today)
-        val aggregates = allSessions.groupBy { it.referenceDateEpochDay }.mapValues { (day, list) ->
+        val allRealSessions = sleepSessionDao.getSessionsInRange(fetchStart, today)
+            .filter { it.id !in prefs.demoSessionIds }
+        val aggregates = allRealSessions.groupBy { it.referenceDateEpochDay }.mapValues { (day, list) ->
             engine.aggregateSessionsForDay(day, list)
         }
 

@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- Quyền tối thiểu để theo dõi giấc ngủ & báo thức thông minh (ZERO INTERNET) -->
+    <!-- Quyền theo dõi giấc ngủ, báo thức & nhắc giờ đi ngủ (dữ liệu ngủ luôn lưu 100% cục bộ) -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
@@ -9,6 +9,10 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.VIBRATE" />
+
+    <!-- Chỉ dùng để kiểm tra & tải APK bản cập nhật chính thức từ GitHub Releases (WaterKansuza/OpenSleep) -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <!-- Quyền đặt báo thức chính xác cho ứng dụng đồng hồ/giấc ngủ trên Android 14+ -->
     <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
@@ -60,9 +64,13 @@
             android:exported="false"
             android:foregroundServiceType="mediaPlayback" />
 
-        <!-- Receiver kích hoạt báo thức & khôi phục lịch sau khi khởi động lại máy -->
+        <!-- Receiver kích hoạt báo thức, nhắc giờ ngủ & khôi phục lịch sau khi khởi động lại máy -->
         <receiver
             android:name=".service.alarm.AlarmReceiver"
+            android:exported="false" />
+
+        <receiver
+            android:name=".service.alarm.BedtimeReminderReceiver"
             android:exported="false" />
 
         <receiver
@@ -73,5 +81,16 @@
             </intent-filter>
         </receiver>
 
+        <!-- FileProvider phục vụ cài đặt đè tệp APK tải từ GitHub Releases -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
+
 </manifest>

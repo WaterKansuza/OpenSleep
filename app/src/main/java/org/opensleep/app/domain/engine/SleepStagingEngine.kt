@@ -57,7 +57,6 @@ class SleepStagingEngine @Inject constructor() {
             return SleepStage.LIGHT
         }
 
-        // Passive Mode fallback: ước lượng REM ở pha cuối chu kỳ 90p sau 65p ngủ
         val cyclePos = (totalElapsedEpochs % 180) / 180f
         if (totalElapsedEpochs >= 130 && cyclePos in 0.70f..0.92f && weightedMotion in 0.025f..0.085f) {
             return SleepStage.REM

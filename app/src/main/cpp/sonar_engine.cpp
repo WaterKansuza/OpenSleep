@@ -61,21 +61,12 @@ bool SonarEngine::start(double carrierFreqHz)
     if (isRunning.load())
         return true;
 
-    // Căn chỉnh sóng mang vào chính tâm bin FFT 4096 để triệt tiêu rò rỉ phổ
-    double df = static_cast<double>(kSampleRate) / 4096.0;
-    double bin = std::round(carrierFreqHz / df);
-    carrierHz = bin * df;
-    phaseStep = kTwoPi * carrierHz / static_cast<double>(kSampleRate);
-
     txPhase = 0.0;
     rxPhase = 0.0;
     decAccumI = 0.0;
     decAccumQ = 0.0;
     decCounter = 0;
 
-    // Goertzel coefficients cho sóng mang và vùng nhiễu lân cận (17500 Hz)
-    gCoeffCarrier = 2.0 * std::cos(kTwoPi * carrierHz / static_cast<double>(kSampleRate));
-    gCoeffNoise = 2.0 * std::cos(kTwoPi * 17500.0 / static_cast<double>(kSampleRate));
     gCarrierS1 = gCarrierS2 = gNoiseS1 = gNoiseS2 = 0.0;
     gSampleCount = 0;
 
@@ -88,14 +79,12 @@ bool SonarEngine::start(double carrierFreqHz)
     breathHistoryIdx = 0;
     breathHistoryCount = 0;
 
-    // Bộ lọc dải thở người: 0.10 Hz (6 bpm) đến 0.55 Hz (33 bpm)
     breathHighPass.configureHighPass(kBasebandRate, 0.10);
     breathLowPass.configureLowPass(kBasebandRate, 0.55);
 
     outCallback = std::make_unique<OutputCallback>(this);
     inCallback = std::make_unique<InputCallback>(this);
 
-    // 1. Mở luồng phát sóng siêu âm CW
     oboe::AudioStreamBuilder outBuilder;
     outBuilder.setDirection(oboe::Direction::Output)
         ->setPerformanceMode(oboe::PerformanceMode::LowLatency)
@@ -113,7 +102,6 @@ bool SonarEngine::start(double carrierFreqHz)
         return false;
     }
 
-    // 2. Mở luồng thu Mic thô (Unprocessed để né AGC/Noise Suppression phần cứng)
     oboe::AudioStreamBuilder inBuilder;
     inBuilder.setDirection(oboe::Direction::Input)
         ->setPerformanceMode(oboe::PerformanceMode::LowLatency)
@@ -137,6 +125,20 @@ bool SonarEngine::start(double carrierFreqHz)
         }
     }
 
+    actualOutputRate = (outputStream->getSampleRate() > 0) ? outputStream->getSampleRate() : kSampleRate;
+    actualInputRate = (inputStream->getSampleRate() > 0) ? inputStream->getSampleRate() : kSampleRate;
+
+    double df = static_cast<double>(actualInputRate) / 4096.0;
+    double bin = std::round(carrierFreqHz / df);
+    carrierHz = bin * df;
+    phaseStep = kTwoPi * carrierHz / static_cast<double>(actualInputRate);
+    txPhaseStep = kTwoPi * carrierHz / static_cast<double>(actualOutputRate);
+    rxPhaseStep = phaseStep;
+    decimationFactor = std::max<int32_t>(1, static_cast<int32_t>(std::llround(actualInputRate / kBasebandRate)));
+
+    gCoeffCarrier = 2.0 * std::cos(kTwoPi * carrierHz / static_cast<double>(actualInputRate));
+    gCoeffNoise = 2.0 * std::cos(kTwoPi * 17500.0 / static_cast<double>(actualInputRate));
+
     isRunning.store(true);
     if (inputStream->requestStart() != oboe::Result::OK ||
         outputStream->requestStart() != oboe::Result::OK)
@@ -145,7 +147,8 @@ bool SonarEngine::start(double carrierFreqHz)
         return false;
     }
 
-    LOGI("SonarEngine started at %.2f Hz", carrierHz);
+    LOGI("SonarEngine started at %.2f Hz (out=%d, in=%d, decim=%d)",
+         carrierHz, actualOutputRate, actualInputRate, decimationFactor);
     return true;
 }
 
@@ -178,9 +181,9 @@ oboe::DataCallbackResult SonarEngine::OutputCallback::onAudioReady(
         return oboe::DataCallbackResult::Continue;
     }
 
-    constexpr float kAmplitude = 0.25f; // Đủ mạnh để thu phản xạ nhưng an toàn cho loa
+    constexpr float kAmplitude = 0.25f;
     double phase = engine->txPhase;
-    const double step = engine->phaseStep;
+    const double step = engine->txPhaseStep;
 
     for (int32_t i = 0; i < numFrames; ++i)
     {
@@ -203,13 +206,13 @@ oboe::DataCallbackResult SonarEngine::InputCallback::onAudioReady(
 
     const auto *in = static_cast<const float *>(audioData);
     double phase = engine->rxPhase;
-    const double step = engine->phaseStep;
+    const double step = engine->rxPhaseStep;
+    const int32_t decim = engine->decimationFactor;
 
     for (int32_t i = 0; i < numFrames; ++i)
     {
         const double sample = static_cast<double>(in[i]);
 
-        // 1. Coherent I/Q Demodulation
         engine->decAccumI += sample * std::cos(phase);
         engine->decAccumQ += sample * (-std::sin(phase));
         engine->decCounter++;
@@ -218,7 +221,6 @@ oboe::DataCallbackResult SonarEngine::InputCallback::onAudioReady(
         if (phase >= kTwoPi)
             phase -= kTwoPi;
 
-        // 2. Goertzel song song để đo SNR Calibration
         double cS0 = sample + engine->gCoeffCarrier * engine->gCarrierS1 - engine->gCarrierS2;
         engine->gCarrierS2 = engine->gCarrierS1;
         engine->gCarrierS1 = cS0;
@@ -238,12 +240,11 @@ oboe::DataCallbackResult SonarEngine::InputCallback::onAudioReady(
             engine->gSampleCount = 0;
         }
 
-        // 3. Decimate 480 mẫu -> 1 mẫu 100 Hz đẩy vào Lock-free Ring Buffer
-        if (engine->decCounter >= kDecimationFactor)
+        if (engine->decCounter >= decim)
         {
             IQBasebandSample iq{
-                static_cast<float>(engine->decAccumI / kDecimationFactor),
-                static_cast<float>(engine->decAccumQ / kDecimationFactor),
+                static_cast<float>(engine->decAccumI / decim),
+                static_cast<float>(engine->decAccumQ / decim),
                 engine->lastCarrierMag,
                 engine->lastNoiseMag};
             engine->pushRingSample(iq);
@@ -262,7 +263,7 @@ bool SonarEngine::pushRingSample(const IQBasebandSample &sample)
     size_t nextW = (w + 1) % kRingCapacity;
     if (nextW == ringReadIdx.load(std::memory_order_acquire))
     {
-        return false; // Ring full
+        return false;
     }
     ringBuffer[w] = sample;
     ringWriteIdx.store(nextW, std::memory_order_release);
@@ -281,7 +282,6 @@ bool SonarEngine::popRingSample(IQBasebandSample &out)
     return true;
 }
 
-// Chỉ trích đoạn hàm pollAndProcessMetrics() cần thay thế trong app/src/main/cpp/sonar_engine.cpp
 SonarMetrics SonarEngine::pollAndProcessMetrics()
 {
     IQBasebandSample sample{};
@@ -337,7 +337,6 @@ SonarMetrics SonarEngine::pollAndProcessMetrics()
         if (breathHistoryCount < kBreathWindowSize)
             breathHistoryCount++;
 
-        // Vùng chết 0.018 rad để nhiễu pha nhiệt tại 100Hz không tự tích thành Awake
         double nonBreathSpeed = std::max(0.0, std::abs(rawDelta) - 0.018);
         if (nonBreathSpeed > maxMotionImpulse)
             maxMotionImpulse = nonBreathSpeed;
@@ -364,11 +363,9 @@ SonarMetrics SonarEngine::pollAndProcessMetrics()
 
 float SonarEngine::estimateBreathingBpm() const
 {
-    // Cần tối thiểu 10 giây dữ liệu (1000 mẫu @ 100 Hz)
     if (breathHistoryCount < 1000)
         return 0.0f;
 
-    // Đếm số lần cắt điểm 0 theo chiều dương (Zero-crossing) với ngưỡng chống nhiễu
     int zeroCrossings = 0;
     bool wasBelow = true;
     constexpr float kHysteresis = 0.02f;

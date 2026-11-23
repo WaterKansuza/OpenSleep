@@ -13,7 +13,10 @@ import android.media.MediaRecorder
 import androidx.core.content.ContextCompat
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.*
+import org.opensleep.app.data.local.db.SoundCategory
 import org.opensleep.app.data.local.db.TrackingMode
+import org.opensleep.app.data.repository.UserPreferencesRepository
+import org.opensleep.app.service.audio.NightSoundClassifier
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.math.log10
@@ -22,7 +25,9 @@ import kotlin.math.sqrt
 
 @Singleton
 class PassiveSleepSensorSource @Inject constructor(
-    @ApplicationContext private val context: Context
+    @ApplicationContext private val context: Context,
+    private val nightSoundClassifier: NightSoundClassifier,
+    private val userPreferencesRepository: UserPreferencesRepository
 ) : SleepSensorSource, SensorEventListener {
 
     override val mode: TrackingMode = TrackingMode.PASSIVE
@@ -45,26 +50,39 @@ class PassiveSleepSensorSource @Inject constructor(
     private var soundActiveFrames = 0
     private var soundTotalFrames = 0
 
-    // Hiệu chuẩn 30s đầu để tránh kẹt ở -55 dB khi phòng có quạt/điều hòa
     private val calibrationSamplesDb = mutableListOf<Float>()
     private var isNoiseCalibrated = false
     private var adaptiveNoiseFloorDb = -48f
+
+    private var yamnetEnabledForSession = true
+    private val audioRing15600 = FloatArray(NightSoundClassifier.REQUIRED_SAMPLES_16KHZ)
+    private var ringWritePos = 0
+    private var ringSampleCount = 0
+    private var lastSoundClassifiedMs = 0L
+    private val detectedEvents = mutableListOf<DetectedSoundEvent>()
 
     companion object {
         private const val SAMPLE_RATE_HZ = 16_000
         private const val GRAVITY_ALPHA = 0.85f
         private const val MOTION_SCALE = 1.8f
-        private const val CALIBRATION_FRAMES_TARGET = 468 // ~30s @ 16kHz / 1024 mẫu
+        private const val CALIBRATION_FRAMES_TARGET = 468
         private const val SOUND_TRANSIENT_MARGIN_DB = 12f
         private const val MAX_SOUND_CONTRIBUTION = 0.15f
+        private const val SOUND_CLASSIFY_COOLDOWN_MS = 12_000L
     }
 
     override suspend fun start() {
         resetAccumulators()
+        yamnetEnabledForSession = userPreferencesRepository.getSnapshot().soundClassificationEnabled
+
         synchronized(lock) {
             calibrationSamplesDb.clear()
             isNoiseCalibrated = false
             adaptiveNoiseFloorDb = -48f
+            ringWritePos = 0
+            ringSampleCount = 0
+            lastSoundClassifiedMs = 0L
+            detectedEvents.clear()
         }
         isGravityInitialized = false
 
@@ -73,6 +91,13 @@ class PassiveSleepSensorSource @Inject constructor(
         }
 
         if (hasMicPermission()) {
+            if (yamnetEnabledForSession) {
+                withContext(Dispatchers.IO) {
+                    nightSoundClassifier.initialize()
+                }
+            } else {
+                nightSoundClassifier.close()
+            }
             startPassiveAudioMonitor()
         }
     }
@@ -152,7 +177,12 @@ class PassiveSleepSensorSource @Inject constructor(
                 while (isActive) {
                     val readCount = recorder.read(pcmBuffer, 0, frameSize)
                     if (readCount > 0) {
+                        if (yamnetEnabledForSession) {
+                            appendSamplesToRing(pcmBuffer, readCount)
+                        }
                         val db = computeRmsDb(pcmBuffer, readCount)
+                        var snapshotToClassify: FloatArray? = null
+
                         synchronized(lock) {
                             if (!isNoiseCalibrated) {
                                 calibrationSamplesDb.add(db)
@@ -170,10 +200,35 @@ class PassiveSleepSensorSource @Inject constructor(
                                 }
                                 if (db > adaptiveNoiseFloorDb + SOUND_TRANSIENT_MARGIN_DB) {
                                     soundActiveFrames++
+                                    val nowMs = System.currentTimeMillis()
+                                    if (yamnetEnabledForSession &&
+                                        ringSampleCount >= NightSoundClassifier.REQUIRED_SAMPLES_16KHZ &&
+                                        nowMs - lastSoundClassifiedMs >= SOUND_CLASSIFY_COOLDOWN_MS
+                                    ) {
+                                        lastSoundClassifiedMs = nowMs
+                                        snapshotToClassify = snapshotOrderedRing()
+                                    }
                                 }
                             }
                             if (db > soundEnergyPeakDb) soundEnergyPeakDb = db
                             soundTotalFrames++
+                        }
+
+                        snapshotToClassify?.let { window ->
+                            val result = nightSoundClassifier.classifyWindow(window)
+                            if (result != null && result.category != SoundCategory.UNKNOWN) {
+                                synchronized(lock) {
+                                    detectedEvents.add(
+                                        DetectedSoundEvent(
+                                            timestampMs = System.currentTimeMillis(),
+                                            durationSeconds = 2,
+                                            category = result.category,
+                                            confidence = result.confidence,
+                                            decibelPeak = db
+                                        )
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -183,6 +238,35 @@ class PassiveSleepSensorSource @Inject constructor(
                     recorder.release()
                 }
             }
+        }
+    }
+
+    private fun appendSamplesToRing(pcm: ShortArray, count: Int) {
+        val len = audioRing15600.size
+        for (i in 0 until count) {
+            audioRing15600[ringWritePos] = pcm[i] / 32768.0f
+            ringWritePos = (ringWritePos + 1) % len
+            if (ringSampleCount < len) ringSampleCount++
+        }
+    }
+
+    private fun snapshotOrderedRing(): FloatArray {
+        val len = audioRing15600.size
+        val out = FloatArray(len)
+        val firstChunk = len - ringWritePos
+        System.arraycopy(audioRing15600, ringWritePos, out, 0, firstChunk)
+        if (ringWritePos > 0) {
+            System.arraycopy(audioRing15600, 0, out, firstChunk, ringWritePos)
+        }
+        return out
+    }
+
+    override fun drainDetectedSoundEvents(): List<DetectedSoundEvent> {
+        synchronized(lock) {
+            if (detectedEvents.isEmpty()) return emptyList()
+            val copy = detectedEvents.toList()
+            detectedEvents.clear()
+            return copy
         }
     }
 

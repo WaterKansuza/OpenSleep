@@ -21,7 +21,9 @@ import org.opensleep.app.data.local.db.WakeMode
 import org.opensleep.app.data.local.db.dao.SleepSessionDao
 import org.opensleep.app.data.local.db.entity.SleepEpochEntity
 import org.opensleep.app.data.local.db.entity.SleepSessionEntity
+import org.opensleep.app.data.local.db.entity.SoundEventEntity
 import org.opensleep.app.data.repository.SleepDebtRepository
+import org.opensleep.app.data.repository.UserPreferencesRepository
 import org.opensleep.app.domain.engine.SleepDebtEngine
 import org.opensleep.app.domain.engine.SleepStagingEngine
 import org.opensleep.app.service.alarm.AlarmRingingService
@@ -35,6 +37,7 @@ class NightTimeService : Service() {
 
     @Inject lateinit var sleepSessionDao: SleepSessionDao
     @Inject lateinit var sleepDebtRepository: SleepDebtRepository
+    @Inject lateinit var userPreferencesRepository: UserPreferencesRepository
     @Inject lateinit var sleepDebtEngine: SleepDebtEngine
     @Inject lateinit var sleepStagingEngine: SleepStagingEngine
     @Inject lateinit var trackingStateHolder: TrackingStateHolder
@@ -49,7 +52,9 @@ class NightTimeService : Service() {
     private var smartWakeTriggered = false
     private val epochBuffer = mutableListOf<SleepEpochEntity>()
     private val recentEpochs = ArrayDeque<SleepEpochEntity>(10)
+    private val soundEventBuffer = mutableListOf<SoundEventEntity>()
     private var totalEpochCount = 0
+    private var sessionStartMs: Long = 0L
 
     companion object {
         const val ACTION_START_TRACKING = "org.opensleep.app.ACTION_START_TRACKING"
@@ -93,9 +98,13 @@ class NightTimeService : Service() {
         promoteToForeground()
         smartWakeTriggered = false
         recentEpochs.clear()
+        epochBuffer.clear()
+        soundEventBuffer.clear()
+        totalEpochCount = 0
 
         trackingJob = serviceScope.launch {
             val nowMs = System.currentTimeMillis()
+            sessionStartMs = nowMs
             val zoneOffsetSec = ZoneId.systemDefault().rules.getOffset(java.time.Instant.ofEpochMilli(nowMs)).totalSeconds
             val initialSession = SleepSessionEntity(
                 referenceDateEpochDay = LocalDate.now().toEpochDay(),
@@ -120,7 +129,8 @@ class NightTimeService : Service() {
                     startTimeMs = nowMs,
                     trackingMode = sensorSource.mode,
                     wakeMode = wakeMode,
-                    currentStage = SleepStage.AWAKE
+                    currentStage = SleepStage.AWAKE,
+                    isInSmartWakeWindow = false
                 )
             }
 
@@ -133,9 +143,12 @@ class NightTimeService : Service() {
                 val reading = sensorSource.collectLatestEpochReading(windowStart, windowEnd)
                 windowStart = windowEnd
 
-                // Phân tầng thời gian thực có ngữ cảnh lịch sử từ SleepStagingEngine
                 totalEpochCount++
-                val stage = sleepStagingEngine.classifyRealtimeEpoch(reading, recentEpochs.toList(), totalEpochCount)
+                val stage = sleepStagingEngine.classifyRealtimeEpoch(
+                    current = reading,
+                    recentHistory = recentEpochs.toList(),
+                    totalElapsedEpochs = totalEpochCount
+                )
                 val epoch = SleepEpochEntity(
                     sessionId = activeSessionId,
                     timestampMs = windowEnd,
@@ -146,13 +159,15 @@ class NightTimeService : Service() {
                 )
                 epochBuffer.add(epoch)
 
+                drainSoundsIntoBuffer(activeSessionId)
+
                 if (recentEpochs.size >= 10) {
                     recentEpochs.removeFirst()
                 }
                 recentEpochs.addLast(epoch)
 
-                // Ghi DB theo lô 10 epoch (5 phút/lần) để bảo vệ bộ nhớ flash & tiết kiệm pin
-                if (epochBuffer.size >= 10) {
+                // Ghi DB theo lô 10 epoch (5 phút/lần) hoặc 5 sự kiện âm thanh để bảo vệ flash & tiết kiệm pin
+                if (epochBuffer.size >= 10 || soundEventBuffer.size >= 5) {
                     flushEpochBuffer()
                 }
 
@@ -164,9 +179,25 @@ class NightTimeService : Service() {
                     )
                 }
 
-                // Kiểm tra Smart Wake Window
                 checkSmartWakeTrigger(stage)
             }
+        }
+    }
+
+    private fun drainSoundsIntoBuffer(sessionId: Long) {
+        if (sessionId == -1L) return
+        val sounds = sensorSource.drainDetectedSoundEvents()
+        sounds.forEach { ev ->
+            soundEventBuffer.add(
+                SoundEventEntity(
+                    sessionId = sessionId,
+                    offsetSeconds = ((ev.timestampMs - sessionStartMs) / 1000L).toInt().coerceAtLeast(0),
+                    durationSeconds = ev.durationSeconds,
+                    category = ev.category,
+                    confidence = ev.confidence,
+                    decibelPeak = ev.decibelPeak
+                )
+            )
         }
     }
 
@@ -176,7 +207,6 @@ class NightTimeService : Service() {
         if (!uiState.isInSmartWakeWindow) return
 
         val elapsedMin = (System.currentTimeMillis() - uiState.startTimeMs) / 60_000L
-        // Đảm bảo đã theo dõi ít nhất 20 phút và đang ở giấc ngủ nông hoặc tỉnh nhẹ
         if (elapsedMin >= 20 && (currentStage == SleepStage.LIGHT || currentStage == SleepStage.AWAKE)) {
             smartWakeTriggered = true
             trackingStateHolder.update { it.copy(wakeMode = WakeMode.SMART_ALARM) }
@@ -193,21 +223,24 @@ class NightTimeService : Service() {
     }
 
     private suspend fun flushEpochBuffer() {
-        if (epochBuffer.isEmpty()) return
-        val copy = epochBuffer.toList()
-        epochBuffer.clear()
+        val epochsCopy = if (epochBuffer.isNotEmpty()) epochBuffer.toList().also { epochBuffer.clear() } else emptyList()
+        val soundsCopy = if (soundEventBuffer.isNotEmpty()) soundEventBuffer.toList().also { soundEventBuffer.clear() } else emptyList()
+        if (epochsCopy.isEmpty() && soundsCopy.isEmpty()) return
         withContext(Dispatchers.IO) {
-            sleepSessionDao.insertEpochs(copy)
+            if (epochsCopy.isNotEmpty()) sleepSessionDao.insertEpochs(epochsCopy)
+            if (soundsCopy.isNotEmpty()) sleepSessionDao.insertSoundEvents(soundsCopy)
         }
     }
 
     private suspend fun finalizeAndStop() {
         trackingJob?.cancel()
         sensorSource.stop()
-        flushEpochBuffer()
 
         val sessionId = activeSessionId
         activeSessionId = -1L
+
+        drainSoundsIntoBuffer(sessionId)
+        flushEpochBuffer()
 
         if (sessionId != -1L) {
             withContext(Dispatchers.IO) {
@@ -217,10 +250,9 @@ class NightTimeService : Service() {
                     val endMs = System.currentTimeMillis()
                     val refDay = LocalDate.now().toEpochDay()
 
-                    // Hậu xử lý toàn đêm (Webster Smoothing Rules)
                     val epochs = sleepStagingEngine.postProcessNightEpochs(rawEpochs)
                     if (epochs.isNotEmpty()) {
-                        sleepSessionDao.insertEpochs(epochs) // Ghi đè bản đã làm mượt vào DB
+                        sleepSessionDao.insertEpochs(epochs)
                     }
                     val lightMs = epochs.count { it.stage == SleepStage.LIGHT } * EPOCH_INTERVAL_MS
                     val deepMs = epochs.count { it.stage == SleepStage.DEEP } * EPOCH_INTERVAL_MS
@@ -251,13 +283,16 @@ class NightTimeService : Service() {
                     val quality = sleepDebtEngine.computeSessionQualityFactor(draftSession)
                     sleepSessionDao.updateSession(draftSession.copy(sleepQualityFactor = quality))
 
-                    // Cập nhật ngay Nợ ngủ cho người dùng
                     sleepDebtRepository.recalculateAfterSessionChange(refDay)
+
+                    val retentionDays = userPreferencesRepository.getSnapshot().soundRetentionDays
+                    if (retentionDays > 0) {
+                        sleepSessionDao.deleteSoundEventsBeforeDay(refDay - retentionDays)
+                    }
                 }
             }
         }
 
-        // Bật Morning Check-in cho người dùng
         trackingStateHolder.update { TrackingUiState(pendingCheckInSessionId = sessionId) }
         recentEpochs.clear()
         releaseWakeLock()

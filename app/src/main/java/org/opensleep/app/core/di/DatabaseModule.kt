@@ -37,7 +37,8 @@ object DatabaseModule {
             AppDatabase::class.java,
             "opensleep_local.db"
         )
-            .fallbackToDestructiveMigration()
+            // KHÔNG dùng fallbackToDestructiveMigration(): bảo vệ 100% lịch sử giấc ngủ khi cập nhật APK.
+            // Khi nâng version Room trong tương lai, đăng ký Migration(from, to) tường minh qua .addMigrations(...)
             .addCallback(object : RoomDatabase.Callback() {
                 override fun onCreate(db: SupportSQLiteDatabase) {
                     super.onCreate(db)
