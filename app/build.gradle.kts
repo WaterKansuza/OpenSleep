@@ -30,8 +30,8 @@ android {
         applicationId = "io.github.waterkansuza.opensleep"
         minSdk = 26 // Android 8.0+: Hỗ trợ sẵn AAudio & java.time
         targetSdk = 37
-        versionCode = 3
-        versionName = "0.3.0"
+        versionCode = 4
+        versionName = "0.4.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         externalNativeBuild {
@@ -69,8 +69,10 @@ android {
 
     buildTypes {
         debug {
-            applicationIdSuffix = ".debug"
-            versionNameSuffix = "-debug"
+            val releaseSigning = signingConfigs.getByName("release")
+            if (releaseSigning.storeFile != null) {
+                signingConfig = releaseSigning
+            }
         }
         release {
             val releaseSigning = signingConfigs.getByName("release")
