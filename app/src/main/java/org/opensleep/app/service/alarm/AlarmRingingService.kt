@@ -22,6 +22,7 @@ import androidx.core.content.ContextCompat
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.*
 import org.opensleep.app.data.local.db.dao.AlarmDao
+import org.opensleep.app.data.repository.UserPreferencesRepository
 import org.opensleep.app.service.tracking.NightTimeService
 import org.opensleep.app.service.tracking.SonarSleepSensorSource
 import org.opensleep.app.service.tracking.TrackingStateHolder
@@ -32,6 +33,7 @@ class AlarmRingingService : Service() {
 
     @Inject lateinit var alarmDao: AlarmDao
     @Inject lateinit var alarmScheduler: AlarmScheduler
+    @Inject lateinit var userPreferencesRepository: UserPreferencesRepository
     @Inject lateinit var sonarSource: SonarSleepSensorSource
     @Inject lateinit var trackingStateHolder: TrackingStateHolder
 
@@ -41,11 +43,13 @@ class AlarmRingingService : Service() {
     private var gestureJob: Job? = null
     private var vibrator: Vibrator? = null
     private var currentAlarmId: Long = -1L
+    private var currentAlarmLabel: String? = null
 
     companion object {
         const val ACTION_START_RINGING = "org.opensleep.app.ACTION_START_RINGING"
         const val ACTION_SNOOZE = "org.opensleep.app.ACTION_SNOOZE"
         const val ACTION_DISMISS = "org.opensleep.app.ACTION_DISMISS"
+        const val EXTRA_ALARM_LABEL = "extra_alarm_label"
         private const val CHANNEL_ID = "opensleep_alarm_channel"
         private const val NOTIFICATION_ID = 2002
     }
@@ -56,6 +60,7 @@ class AlarmRingingService : Service() {
         when (intent?.action) {
             ACTION_START_RINGING -> {
                 currentAlarmId = intent.getLongExtra(AlarmScheduler.EXTRA_ALARM_ID, -1L)
+                currentAlarmLabel = intent.getStringExtra(EXTRA_ALARM_LABEL)
                 startForegroundAlarm()
                 scope.launch { startPlaybackAndVibration(currentAlarmId) }
             }
@@ -81,10 +86,12 @@ class AlarmRingingService : Service() {
 
     private fun startForegroundAlarm() {
         createNotificationChannel()
+        val title = currentAlarmLabel ?: "Đã đến giờ thức dậy"
         val fullScreenIntent = Intent().apply {
             setClassName(this@AlarmRingingService, "org.opensleep.app.ui.alarm.AlarmRingingActivity")
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
             putExtra(AlarmScheduler.EXTRA_ALARM_ID, currentAlarmId)
+            putExtra(EXTRA_ALARM_LABEL, title)
         }
         val fullScreenPendingIntent = PendingIntent.getActivity(
             this, 0, fullScreenIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
@@ -95,7 +102,7 @@ class AlarmRingingService : Service() {
 
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
-            .setContentTitle("Đã đến giờ thức dậy")
+            .setContentTitle(title)
             .setContentText("Nhấn để tắt hoặc hoãn báo thức")
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setCategory(NotificationCompat.CATEGORY_ALARM)
@@ -116,11 +123,17 @@ class AlarmRingingService : Service() {
         val config = withContext(Dispatchers.IO) {
             if (alarmId != -1L) alarmDao.getAlarmById(alarmId) else null
         }
+        val prefs = withContext(Dispatchers.IO) { userPreferencesRepository.getSnapshot() }
+        val customUri = prefs.alarmRingtoneUri?.let { Uri.parse(it) }
+
         val uri = config?.ringtoneUri?.let { Uri.parse(it) }
+            ?: customUri
             ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
+            ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
             ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
 
-        val fadeSeconds = (config?.gentleFadeSeconds ?: 60).coerceIn(5, 180)
+        // Bắt đầu ngay từ 0.30f để nghe rõ dứt khoát như đồng hồ báo thức thật, tăng lên 1.0f trong 12 giây
+        val fadeSeconds = 12
 
         runCatching {
             mediaPlayer?.release()
@@ -128,13 +141,13 @@ class AlarmRingingService : Service() {
                 setAudioAttributes(
                     AudioAttributes.Builder()
                         .setUsage(AudioAttributes.USAGE_ALARM)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
                         .build()
                 )
                 setDataSource(this@AlarmRingingService, uri)
                 isLooping = true
                 prepare()
-                setVolume(0.05f, 0.05f)
+                setVolume(0.30f, 0.30f)
                 start()
             }
         }
@@ -144,7 +157,7 @@ class AlarmRingingService : Service() {
             val steps = fadeSeconds * 2
             for (i in 1..steps) {
                 val progress = i.toFloat() / steps
-                val vol = (0.05f + 0.95f * (progress * progress)).coerceIn(0.05f, 1.0f)
+                val vol = (0.30f + 0.70f * progress).coerceIn(0.30f, 1.0f)
                 mediaPlayer?.setVolume(vol, vol)
                 delay(500L)
             }
@@ -177,7 +190,7 @@ class AlarmRingingService : Service() {
             @Suppress("DEPRECATION")
             getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
         }
-        val pattern = longArrayOf(0, 600, 800, 600, 800)
+        val pattern = longArrayOf(0, 500, 200, 500, 200, 500, 800)
         vibrator?.vibrate(VibrationEffect.createWaveform(pattern, 0))
     }
 

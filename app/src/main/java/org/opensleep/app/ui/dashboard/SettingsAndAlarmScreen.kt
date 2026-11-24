@@ -1,6 +1,8 @@
 package org.opensleep.app.ui.settings
 
 import android.content.Context
+import android.content.Intent
+import android.media.RingtoneManager
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -42,6 +44,8 @@ fun SettingsAndAlarmScreen(
     onSelectFontKey: (String) -> Unit,
     onUpdateSleepNeed: (Int) -> Unit,
     onToggleAutoCalibrate: (Boolean) -> Unit,
+    onSetPowerNapDuration: (Int) -> Unit = {},
+    onSetAlarmRingtone: (String?, String?) -> Unit = { _, _ -> },
     onToggleAlarm: (AlarmConfigEntity, Boolean) -> Unit,
     onDeleteAlarm: (AlarmConfigEntity) -> Unit,
     onRunCalibration: () -> Unit,
@@ -76,6 +80,20 @@ fun SettingsAndAlarmScreen(
                 } else {
                     onImportBackup(uri, null)
                 }
+            }
+        }
+    }
+
+    val ringtoneLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        if (result.resultCode == android.app.Activity.RESULT_OK) {
+            @Suppress("DEPRECATION")
+            val uri = result.data?.getParcelableExtra<Uri>(RingtoneManager.EXTRA_RINGTONE_PICKED_URI)
+            if (uri != null) {
+                val ringtone = RingtoneManager.getRingtone(context, uri)
+                val title = ringtone?.getTitle(context) ?: "Chuông tùy chỉnh"
+                onSetAlarmRingtone(uri.toString(), title)
+            } else {
+                onSetAlarmRingtone(null, "Mặc định hệ thống")
             }
         }
     }
@@ -406,6 +424,91 @@ fun SettingsAndAlarmScreen(
                                     Icon(Icons.Rounded.Delete, contentDescription = null, tint = SleepPalette.OnBackgroundMuted)
                                 }
                             }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 5b. Tùy chỉnh Chuông báo thức & Thời lượng Power Nap
+        Card(
+            colors = CardDefaults.cardColors(containerColor = SleepPalette.SurfaceCard),
+            shape = RoundedCornerShape(20.dp)
+        ) {
+            Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                Text(
+                    text = "Chuông báo thức & Chợp mắt",
+                    color = SleepPalette.OnBackground,
+                    fontWeight = FontWeight.Bold,
+                    style = MaterialTheme.typography.titleMedium
+                )
+
+                // 1. Chọn chuông báo thức
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        text = "Âm thanh chuông báo thức:",
+                        color = SleepPalette.OnBackgroundMuted,
+                        style = MaterialTheme.typography.labelMedium
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(Icons.Rounded.NotificationsActive, contentDescription = null, tint = SleepPalette.StageRem)
+                            Text(
+                                text = uiState.preferences.alarmRingtoneTitle ?: "Mặc định hệ thống",
+                                color = SleepPalette.OnBackground,
+                                style = MaterialTheme.typography.bodyMedium,
+                                maxLines = 1
+                            )
+                        }
+                        OutlinedButton(
+                            onClick = {
+                                val intent = Intent(RingtoneManager.ACTION_RINGTONE_PICKER).apply {
+                                    putExtra(RingtoneManager.EXTRA_RINGTONE_TYPE, RingtoneManager.TYPE_ALARM)
+                                    putExtra(RingtoneManager.EXTRA_RINGTONE_TITLE, "Chọn chuông báo thức")
+                                    putExtra(RingtoneManager.EXTRA_RINGTONE_SHOW_DEFAULT, true)
+                                    putExtra(RingtoneManager.EXTRA_RINGTONE_SHOW_SILENT, false)
+                                    uiState.preferences.alarmRingtoneUri?.let {
+                                        putExtra(RingtoneManager.EXTRA_RINGTONE_EXISTING_URI, Uri.parse(it))
+                                    }
+                                }
+                                ringtoneLauncher.launch(intent)
+                            },
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Text("Đổi chuông")
+                        }
+                    }
+                }
+
+                HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+
+                // 2. Thời lượng Power Nap
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "Thời lượng Power Nap trưa (Chuẩn: 20p):",
+                        color = SleepPalette.OnBackgroundMuted,
+                        style = MaterialTheme.typography.labelMedium
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        listOf(15 to "15p", 20 to "20p (chuẩn)", 25 to "25p", 30 to "30p").forEach { (duration, label) ->
+                            val isSelected = uiState.preferences.powerNapDurationMinutes == duration
+                            FilterChip(
+                                selected = isSelected,
+                                onClick = { onSetPowerNapDuration(duration) },
+                                label = { Text(label, style = MaterialTheme.typography.labelSmall) },
+                                modifier = Modifier.weight(1f)
+                            )
                         }
                     }
                 }

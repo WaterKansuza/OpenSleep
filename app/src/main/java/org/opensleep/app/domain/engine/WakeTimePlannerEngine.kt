@@ -1,5 +1,6 @@
 package org.opensleep.app.domain.engine
 
+import org.opensleep.app.data.local.db.DebtStatusLevel
 import org.opensleep.app.data.local.db.SessionType
 import org.opensleep.app.data.local.db.TrackingMode
 import org.opensleep.app.data.local.db.entity.SleepSessionEntity
@@ -11,7 +12,9 @@ import javax.inject.Singleton
 import kotlin.math.roundToInt
 
 @Singleton
-class WakeTimePlannerEngine @Inject constructor() {
+class WakeTimePlannerEngine @Inject constructor(
+    private val recoveryPlanner: SleepDebtRecoveryPlanner
+) {
 
     companion object {
         private const val MINUTES_IN_DAY = 1440
@@ -22,7 +25,9 @@ class WakeTimePlannerEngine @Inject constructor() {
         personalSleepNeedMinutes: Int,
         recentSessions: List<SleepSessionEntity>,
         estimatedDebtMinutes: Int,
-        today: LocalDate = LocalDate.now()
+        today: LocalDate = LocalDate.now(),
+        debtStatusLevel: DebtStatusLevel = DebtStatusLevel.OPTIMAL,
+        typicalWakeMinutesOfDay: Int = -1
     ): BedtimeRecommendation {
         val tomorrow = today.plusDays(1)
         val dayBit = tomorrow.dayOfWeek.ordinal // MONDAY=0 .. SUNDAY=6
@@ -54,25 +59,51 @@ class WakeTimePlannerEngine @Inject constructor() {
             prefs.defaultLatencyFallbackMin.coerceIn(5, 45)
         }
 
-        val bedtimeMin = if (prefs.customBedtimeEnabled) {
+        // Giờ lên giường cơ bản (chưa tính trả nợ)
+        val baseBedtimeMin = if (prefs.customBedtimeEnabled) {
             prefs.customBedtimeHour.coerceIn(0, 23) * 60 + prefs.customBedtimeMinute.coerceIn(0, 59)
         } else {
             wrapMinutes(targetWakeMinOfDay - personalSleepNeedMinutes - estimatedLatency)
         }
 
-        val plannedSleepMinutes = wrapMinutes(targetWakeMinOfDay - bedtimeMin)
-
-        val debtSuggestion = if (estimatedDebtMinutes >= 150) {
-            val h = estimatedDebtMinutes / 60
-            val m = estimatedDebtMinutes % 60
-            "Nợ ngủ ước tính ${h}h ${m}p · Có thể cân nhắc nghỉ sớm hơn ~20–30p (tùy chọn)."
+        // Tính kế hoạch phục hồi nợ ngủ từ SleepDebtRecoveryPlanner
+        val effectiveDebtLevel = if (debtStatusLevel == DebtStatusLevel.OPTIMAL && estimatedDebtMinutes >= 120) {
+            when {
+                estimatedDebtMinutes >= 480 -> DebtStatusLevel.CRITICAL
+                estimatedDebtMinutes >= 300 -> DebtStatusLevel.HIGH
+                else -> DebtStatusLevel.MILD
+            }
         } else {
-            null
+            debtStatusLevel
+        }
+
+        val effectiveTypicalWake = if (typicalWakeMinutesOfDay >= 0) typicalWakeMinutesOfDay
+            else targetWakeMinOfDay
+        val recoveryPlan = recoveryPlanner.computePlan(
+            debtStatusLevel = effectiveDebtLevel,
+            cumulativeDebtMinutes = estimatedDebtMinutes,
+            typicalWakeMinutesOfDay = effectiveTypicalWake,
+            isRestDay = isRestDayTomorrow
+        )
+
+        // Giờ lên giường sau khi áp dụng kế hoạch trả nợ
+        // Chỉ điều chỉnh nếu người dùng chưa set custom bedtime
+        val adjustedBedtimeMin = if (!prefs.customBedtimeEnabled) {
+            wrapMinutes(baseBedtimeMin - recoveryPlan.extraBedtimeMinutes)
+        } else {
+            baseBedtimeMin
+        }
+
+        val plannedSleepMinutes = wrapMinutes(targetWakeMinOfDay - baseBedtimeMin)
+
+        // Giữ chuỗi gợi ý tương thích ngược cho các màn hình cũ
+        val debtSuggestion = recoveryPlan.summaryText.takeIf {
+            recoveryPlan.recoveryStrategy != SleepDebtRecoveryPlanner.RecoveryStrategy.MAINTAIN
         }
 
         return BedtimeRecommendation(
-            recommendedBedtimeMinutesOfDay = bedtimeMin,
-            recommendedBedtimeLabel = formatClock(bedtimeMin),
+            recommendedBedtimeMinutesOfDay = baseBedtimeMin,
+            recommendedBedtimeLabel = formatClock(baseBedtimeMin),
             targetWakeMinutesOfDay = targetWakeMinOfDay,
             targetWakeLabel = formatClock(targetWakeMinOfDay),
             plannedSleepMinutes = plannedSleepMinutes,
@@ -81,7 +112,9 @@ class WakeTimePlannerEngine @Inject constructor() {
             personalSleepNeedMinutes = personalSleepNeedMinutes,
             estimatedLatencyMinutes = estimatedLatency,
             isLatencyEstimatedDefault = !hasEnoughLatency,
-            debtRecoverySuggestion = debtSuggestion
+            debtRecoverySuggestion = debtSuggestion,
+            recoveryPlan = recoveryPlan,
+            adjustedBedtimeMinutesOfDay = adjustedBedtimeMin
         )
     }
 

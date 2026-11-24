@@ -46,6 +46,7 @@ fun TodayScreen(
     onToggleSmartWake: (Boolean) -> Unit,
     onStartSleep: () -> Unit,
     onStopTracking: () -> Unit,
+    onStartPowerNap: () -> Unit = {},
     onQuickFeeling: (Long, Int) -> Unit,
     onSubmitCheckIn: (Long, Int, Set<Long>, String) -> Unit,
     onDismissCheckIn: () -> Unit,
@@ -220,22 +221,8 @@ fun TodayScreen(
                         )
                     }
 
-                    // Nút tăng giảm chính xác từng 1 phút hoặc 15 phút cho Giờ đi ngủ
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        listOf(-15 to "-15p", -1 to "-1p", 1 to "+1p", 15 to "+15p").forEach { (delta, label) ->
-                            OutlinedButton(
-                                onClick = { shiftClock(bedTotalMin, delta, onUpdateBedtime) },
-                                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp),
-                                shape = RoundedCornerShape(12.dp),
-                                modifier = Modifier.weight(1f).height(34.dp)
-                            ) {
-                                Text(label, style = MaterialTheme.typography.labelSmall, color = SleepPalette.OnBackground)
-                            }
-                        }
-                    }
+                    // Nút tăng giảm chính xác từng 1 phút hoặc 15 phút cho Giờ đi ngủ — ĐÃ CHUYỂN VÀO PICKER
+                    // (Chạm vào giờ để mở TimePicker chỉnh phút)
 
                     val plannedMin = rec?.plannedSleepMinutes ?: 480
                     val needMin = rec?.personalSleepNeedMinutes ?: 480
@@ -303,21 +290,7 @@ fun TodayScreen(
                                     color = SleepPalette.StageRem
                                 )
                             }
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                listOf(-15 to "-15p", -1 to "-1p", 1 to "+1p", 15 to "+15p").forEach { (delta, label) ->
-                                    OutlinedButton(
-                                        onClick = { shiftClock(wakeTotalMin, delta, onUpdateWakeTime) },
-                                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp),
-                                        shape = RoundedCornerShape(12.dp),
-                                        modifier = Modifier.weight(1f).height(32.dp)
-                                    ) {
-                                        Text(label, style = MaterialTheme.typography.labelSmall, color = SleepPalette.OnBackgroundMuted)
-                                    }
-                                }
-                            }
+                            // Nút shift giờ thức đã chuyển vào TimePicker — chạm vào giờ để chỉnh
                         }
                     }
                 }
@@ -366,7 +339,7 @@ fun TodayScreen(
                     )
                     SleepModeOptionTile(
                         title = "Ngủ trưa",
-                        subtitle = "Nap 25p",
+                        subtitle = "Nap ${uiState.powerNapDurationMin}p",
                         icon = Icons.Rounded.Coffee,
                         accent = SleepPalette.StarGold,
                         selected = uiState.selectedSleepMode == TodaySleepModeOption.NAP,
@@ -390,6 +363,24 @@ fun TodayScreen(
                             )
                         }
                         Switch(checked = uiState.smartWakeEnabled, onCheckedChange = onToggleSmartWake)
+                    }
+                }
+
+                // Nút Power Nap 20p nhanh — chỉ hiện khi không ở chế độ NAP
+                if (uiState.selectedSleepMode != TodaySleepModeOption.NAP) {
+                    OutlinedButton(
+                        onClick = onStartPowerNap,
+                        modifier = Modifier.fillMaxWidth().height(44.dp),
+                        shape = RoundedCornerShape(14.dp),
+                        border = BorderStroke(1.dp, SleepPalette.StarGold.copy(alpha = 0.5f)),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            containerColor = SleepPalette.StarGold.copy(alpha = 0.08f),
+                            contentColor = SleepPalette.StarGold
+                        )
+                    ) {
+                        Icon(Icons.Rounded.Coffee, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("Power Nap ${uiState.powerNapDurationMin}p", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
                     }
                 }
 

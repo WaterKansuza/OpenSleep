@@ -61,6 +61,7 @@ class NightTimeService : Service() {
         const val ACTION_STOP_TRACKING = "org.opensleep.app.ACTION_STOP_TRACKING"
         const val EXTRA_SESSION_TYPE = "extra_session_type"
         const val EXTRA_WAKE_MODE = "extra_wake_mode"
+        const val EXTRA_NAP_DURATION_MIN = "extra_nap_duration_min"
 
         private const val CHANNEL_ID = "opensleep_tracking_channel"
         private const val NOTIFICATION_ID = 1001
@@ -80,7 +81,8 @@ class NightTimeService : Service() {
                 val wakeModeName = intent.getStringExtra(EXTRA_WAKE_MODE)
                 val wakeMode = runCatching { WakeMode.valueOf(wakeModeName ?: "NATURAL_NO_ALARM") }
                     .getOrDefault(WakeMode.NATURAL_NO_ALARM)
-                startTrackingPipeline(sessionType, wakeMode)
+                val napDurationMin = intent.getIntExtra(EXTRA_NAP_DURATION_MIN, -1)
+                startTrackingPipeline(sessionType, wakeMode, napDurationMin)
             }
             ACTION_STOP_TRACKING -> {
                 if (activeSessionId != -1L) {
@@ -93,7 +95,7 @@ class NightTimeService : Service() {
         return START_STICKY
     }
 
-    private fun startTrackingPipeline(sessionType: SessionType, wakeMode: WakeMode) {
+    private fun startTrackingPipeline(sessionType: SessionType, wakeMode: WakeMode, napDurationMin: Int = -1) {
         acquireWakeLock()
         promoteToForeground()
         smartWakeTriggered = false
@@ -135,6 +137,23 @@ class NightTimeService : Service() {
             }
 
             sensorSource.start()
+
+            // Khi hết giờ Power Nap: Kích hoạt chuông báo thức nhưng KHÔNG tự động kết thúc phiên đo!
+            // Phiên đo chỉ kết thúc khi người dùng chủ động nhấn tắt báo thức / xác nhận đã thức dậy.
+            if (sessionType == SessionType.NAP && napDurationMin > 0) {
+                launch {
+                    delay(napDurationMin * 60_000L)
+                    if (isActive) {
+                        val alarmIntent = Intent(this@NightTimeService, AlarmRingingService::class.java).apply {
+                            action = AlarmRingingService.ACTION_START_RINGING
+                            putExtra(AlarmScheduler.EXTRA_ALARM_ID, -1L)
+                            putExtra(AlarmRingingService.EXTRA_ALARM_LABEL, "Hết giờ chợp mắt (Power Nap ${napDurationMin}p)")
+                        }
+                        ContextCompat.startForegroundService(this@NightTimeService, alarmIntent)
+                    }
+                }
+            }
+
             var windowStart = System.currentTimeMillis()
 
             while (isActive) {

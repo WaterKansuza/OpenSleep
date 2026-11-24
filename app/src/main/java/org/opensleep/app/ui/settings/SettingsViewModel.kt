@@ -153,6 +153,18 @@ class SettingsViewModel @Inject constructor(
         bedtimeReminderScheduler.syncReminder(prefs.bedtimeReminderEnabled, rec.recommendedBedtimeMinutesOfDay)
     }
 
+    fun setPowerNapDuration(minutes: Int) {
+        viewModelScope.launch {
+            userPreferencesRepository.setPowerNapDuration(minutes)
+        }
+    }
+
+    fun setAlarmRingtone(uri: String?, title: String?) {
+        viewModelScope.launch {
+            userPreferencesRepository.setAlarmRingtone(uri, title)
+        }
+    }
+
     fun setAutoCheckUpdatesEnabled(enabled: Boolean) {
         viewModelScope.launch { userPreferencesRepository.setAutoCheckUpdatesEnabled(enabled) }
     }

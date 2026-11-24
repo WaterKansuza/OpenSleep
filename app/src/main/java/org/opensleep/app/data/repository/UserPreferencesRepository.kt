@@ -39,7 +39,10 @@ data class UserPreferencesState(
     val autoCheckUpdatesEnabled: Boolean = true,
     val dismissedUpdateTag: String? = null,
     val demoSessionIds: Set<Long> = emptySet(),
-    val dismissedWarningEpochs: Map<String, Long> = emptyMap()
+    val dismissedWarningEpochs: Map<String, Long> = emptyMap(),
+    val powerNapDurationMinutes: Int = 20,
+    val alarmRingtoneUri: String? = null,
+    val alarmRingtoneTitle: String? = null
 ) {
     companion object {
         // Bit 0 = Thứ 2 ... Bit 5 = Thứ 7, Bit 6 = Chủ nhật
@@ -73,6 +76,9 @@ class UserPreferencesRepository @Inject constructor(
         val DISMISSED_UPDATE_TAG = stringPreferencesKey("dismissed_update_tag")
         val DEMO_SESSION_IDS = stringSetPreferencesKey("demo_session_ids")
         val DISMISSED_WARNINGS = stringSetPreferencesKey("dismissed_warnings")
+        val POWER_NAP_DURATION_MINUTES = intPreferencesKey("power_nap_duration_minutes")
+        val ALARM_RINGTONE_URI = stringPreferencesKey("alarm_ringtone_uri")
+        val ALARM_RINGTONE_TITLE = stringPreferencesKey("alarm_ringtone_title")
     }
 
     val preferencesFlow: Flow<UserPreferencesState> = context.openSleepDataStore.data.map { prefs ->
@@ -190,6 +196,19 @@ class UserPreferencesRepository @Inject constructor(
         }
     }
 
+    suspend fun setPowerNapDuration(minutes: Int) {
+        context.openSleepDataStore.edit {
+            it[Keys.POWER_NAP_DURATION_MINUTES] = minutes.coerceIn(10, 60)
+        }
+    }
+
+    suspend fun setAlarmRingtone(uri: String?, title: String?) {
+        context.openSleepDataStore.edit {
+            if (uri != null) it[Keys.ALARM_RINGTONE_URI] = uri else it.remove(Keys.ALARM_RINGTONE_URI)
+            if (title != null) it[Keys.ALARM_RINGTONE_TITLE] = title else it.remove(Keys.ALARM_RINGTONE_TITLE)
+        }
+    }
+
     suspend fun dismissWarning(warningKey: String, epochDay: Long = LocalDate.now().toEpochDay()) {
         context.openSleepDataStore.edit {
             val current = (it[Keys.DISMISSED_WARNINGS] ?: emptySet())
@@ -232,7 +251,10 @@ class UserPreferencesRepository @Inject constructor(
             autoCheckUpdatesEnabled = this[Keys.AUTO_CHECK_UPDATES_ENABLED] ?: true,
             dismissedUpdateTag = this[Keys.DISMISSED_UPDATE_TAG],
             demoSessionIds = demoIds,
-            dismissedWarningEpochs = dismissed
+            dismissedWarningEpochs = dismissed,
+            powerNapDurationMinutes = this[Keys.POWER_NAP_DURATION_MINUTES] ?: 20,
+            alarmRingtoneUri = this[Keys.ALARM_RINGTONE_URI],
+            alarmRingtoneTitle = this[Keys.ALARM_RINGTONE_TITLE]
         )
     }
 }

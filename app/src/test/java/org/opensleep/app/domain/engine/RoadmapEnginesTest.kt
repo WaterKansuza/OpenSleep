@@ -17,7 +17,7 @@ class RoadmapEnginesTest {
 
     @Test
     fun wakeTimePlannerWrapsCleanlyPastMidnight() {
-        val engine = WakeTimePlannerEngine()
+        val engine = WakeTimePlannerEngine(SleepDebtRecoveryPlanner())
         val prefs = UserPreferencesState(
             weekdayWakeHour = 6,
             weekdayWakeMinute = 30,
@@ -41,7 +41,7 @@ class RoadmapEnginesTest {
 
     @Test
     fun customOneMinuteBedtimeAndFlexibleRestDayWorkAcrossMidnight() {
-        val engine = WakeTimePlannerEngine()
+        val engine = WakeTimePlannerEngine(SleepDebtRecoveryPlanner())
         // Thứ 5 2026-11-19 -> ngày mai là Thứ 6 (bit 4)
         val prefs = UserPreferencesState(
             weekdayWakeHour = 6,

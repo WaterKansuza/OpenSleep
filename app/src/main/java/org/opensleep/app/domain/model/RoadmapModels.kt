@@ -1,5 +1,7 @@
 package org.opensleep.app.domain.model
 
+import org.opensleep.app.domain.engine.SleepDebtRecoveryPlanner
+
 enum class DataProvenance(val labelVi: String) {
     MEASURED_SONAR("Đo trực tiếp Sonar 18.75kHz · Stage ước tính"),
     MEASURED_PASSIVE("Đo Passive (Gia tốc + Mic) · Stage ước tính"),
@@ -18,7 +20,12 @@ data class BedtimeRecommendation(
     val personalSleepNeedMinutes: Int,
     val estimatedLatencyMinutes: Int,
     val isLatencyEstimatedDefault: Boolean,
-    val debtRecoverySuggestion: String?
+    /** Dòng gợi ý nợ ngủ ngắn gọn (giữ tương thích ngược). */
+    val debtRecoverySuggestion: String?,
+    /** Kế hoạch trả nợ ngủ chi tiết từ SleepDebtRecoveryPlanner — null trước khi tính xong. */
+    val recoveryPlan: SleepDebtRecoveryPlanner.RecoveryPlan? = null,
+    /** Giờ lên giường ĐÃ cộng thêm thời gian đi ngủ sớm theo kế hoạch trả nợ (phút trong ngày). */
+    val adjustedBedtimeMinutesOfDay: Int = recommendedBedtimeMinutesOfDay
 )
 
 data class SleepQualityMetrics(

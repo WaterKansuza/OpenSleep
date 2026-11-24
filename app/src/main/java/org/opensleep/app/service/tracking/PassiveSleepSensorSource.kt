@@ -106,6 +106,10 @@ class PassiveSleepSensorSource @Inject constructor(
         sensorManager.unregisterListener(this)
         audioJob?.cancel()
         audioJob = null
+        // [FIX] Giải phóng bộ nhớ TFLite YAMNet ngay khi dừng phiên — tránh rò rỉ RAM
+        withContext(Dispatchers.IO) {
+            nightSoundClassifier.close()
+        }
     }
 
     override fun onSensorChanged(event: SensorEvent) {

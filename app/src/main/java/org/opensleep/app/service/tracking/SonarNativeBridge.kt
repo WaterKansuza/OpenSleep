@@ -1,5 +1,6 @@
 package org.opensleep.app.service.tracking
 
+import android.util.Log
 import kotlinx.coroutines.delay
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -16,8 +17,22 @@ data class NativeSonarFrame(
 @Singleton
 class SonarNativeBridge @Inject constructor() {
     companion object {
-        init {
+        private const val TAG = "SonarNativeBridge"
+
+        /**
+         * [FIX] Nạp thư viện native an toàn — bắt UnsatisfiedLinkError thay vì crash app
+         * ngay khi khởi động trên thiết bị không hỗ trợ ABI hoặc thiếu file .so.
+         */
+        val isNativeLoaded: Boolean = try {
             System.loadLibrary("opensleep_sonar")
+            true
+        } catch (e: UnsatisfiedLinkError) {
+            Log.w(TAG, "Thư viện Sonar native không khả dụng trên thiết bị này, " +
+                "sẽ dùng chế độ Passive tracking.", e)
+            false
+        } catch (e: Throwable) {
+            Log.e(TAG, "Lỗi không xác định khi nạp thư viện Sonar native.", e)
+            false
         }
     }
 
@@ -25,19 +40,41 @@ class SonarNativeBridge @Inject constructor() {
     private external fun nativeStop()
     private external fun nativePollMetrics(): FloatArray
 
-    fun startSonar(carrierFreqHz: Double = 18750.0): Boolean = nativeStart(carrierFreqHz)
-    fun stopSonar() = nativeStop()
+    fun startSonar(carrierFreqHz: Double = 18750.0): Boolean {
+        if (!isNativeLoaded) return false
+        return try {
+            nativeStart(carrierFreqHz)
+        } catch (e: Throwable) {
+            Log.e(TAG, "Lỗi khi gọi nativeStart()", e)
+            false
+        }
+    }
+
+    fun stopSonar() {
+        if (!isNativeLoaded) return
+        try { nativeStop() } catch (e: Throwable) {
+            Log.e(TAG, "Lỗi khi gọi nativeStop()", e)
+        }
+    }
 
     fun pollMetrics(): NativeSonarFrame {
-        val arr = nativePollMetrics()
-        return NativeSonarFrame(
-            motionIntensity = arr[0],
-            breathingBpm = arr[1],
-            confidence = arr[2],
-            gestureImpulse = arr[3],
-            carrierSnrDb = arr[4],
-            latestBreathWave = arr[5]
-        )
+        if (!isNativeLoaded) {
+            return NativeSonarFrame(0f, 0f, 0f, 0f, -99f, 0f)
+        }
+        return try {
+            val arr = nativePollMetrics()
+            NativeSonarFrame(
+                motionIntensity = arr.getOrElse(0) { 0f },
+                breathingBpm = arr.getOrElse(1) { 0f },
+                confidence = arr.getOrElse(2) { 0f },
+                gestureImpulse = arr.getOrElse(3) { 0f },
+                carrierSnrDb = arr.getOrElse(4) { -99f },
+                latestBreathWave = arr.getOrElse(5) { 0f }
+            )
+        } catch (e: Throwable) {
+            Log.e(TAG, "Lỗi khi gọi nativePollMetrics()", e)
+            NativeSonarFrame(0f, 0f, 0f, 0f, -99f, 0f)
+        }
     }
 
     /**

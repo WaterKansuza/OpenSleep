@@ -47,6 +47,7 @@ data class TodayUiState(
     val smartWakeEnabled: Boolean = true,
     val effectiveSmartWindowMin: Int = 30,
     val optionalCheckInEnabled: Boolean = false,
+    val powerNapDurationMin: Int = 20,
     val tracking: TrackingUiState = TrackingUiState(),
     val availableNotes: List<SleepNoteEntity> = emptyList(),
     val pendingCheckInSessionId: Long? = null
@@ -114,7 +115,9 @@ class TodayViewModel @Inject constructor(
                 personalSleepNeedMinutes = analysis.activeSleepNeedMinutes,
                 recentSessions = sessions,
                 estimatedDebtMinutes = analysis.cumulativeDebtMinutes,
-                today = LocalDate.ofEpochDay(todayEpoch)
+                today = LocalDate.ofEpochDay(todayEpoch),
+                debtStatusLevel = analysis.statusLevel,
+                typicalWakeMinutesOfDay = analysis.circadianForecast.morningPeakStartMin - 120
             )
             val effWindow = sleepDebtEngine.computeDebtAwareSmartWindow(
                 baseWindowMinutes = if (prefs.smartWakeEnabled) 30 else 0,
@@ -129,6 +132,7 @@ class TodayViewModel @Inject constructor(
                 smartWakeEnabled = prefs.smartWakeEnabled,
                 effectiveSmartWindowMin = effWindow,
                 optionalCheckInEnabled = prefs.optionalCheckInEnabled,
+                powerNapDurationMin = prefs.powerNapDurationMinutes,
                 tracking = tracking,
                 availableNotes = notes,
                 pendingCheckInSessionId = tracking.pendingCheckInSessionId
@@ -240,12 +244,19 @@ class TodayViewModel @Inject constructor(
     }
 
     fun startPowerNap() {
+        val napDuration = uiState.value.powerNapDurationMin
         val intent = Intent(context, NightTimeService::class.java).apply {
             action = NightTimeService.ACTION_START_TRACKING
             putExtra(NightTimeService.EXTRA_SESSION_TYPE, SessionType.NAP.name)
-            putExtra(NightTimeService.EXTRA_WAKE_MODE, WakeMode.NATURAL_NO_ALARM.name)
+            putExtra(NightTimeService.EXTRA_WAKE_MODE, WakeMode.HARD_ALARM.name)
+            putExtra(NightTimeService.EXTRA_NAP_DURATION_MIN, napDuration)
         }
         ContextCompat.startForegroundService(context, intent)
+    }
+
+    /** Quick Power Nap theo thời lượng đã cài đặt (mặc định 20p) — hết giờ sẽ reo chuông báo thức */
+    fun startQuickPowerNap() {
+        startPowerNap()
     }
 
     fun stopTracking() {
